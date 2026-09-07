@@ -1,0 +1,5 @@
+ICI Archivos archival integration spike
+
+This is a non-sensitive synthetic record used to prove transfer, AIP storage,
+hierarchical DIP upload, and digital-object access in the pinned MVP stack.
+

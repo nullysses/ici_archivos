@@ -1,0 +1,26 @@
+---
+networks:
+  archival_integration:
+    name: ici-archival-integration
+    external: true
+
+volumes:
+  sword_deposit:
+    name: ici-archival-integration-sword
+    external: true
+
+services:
+  archivematica-dashboard:
+    networks:
+      - default
+      - archival_integration
+
+  archivematica-mcp-client:
+    networks:
+      - default
+      - archival_integration
+    volumes:
+      # AtoM defaults its SWORD deposit directory to /tmp. Sharing only this
+      # development volume avoids SSH/rsync while preserving native SWORD flow.
+      - sword_deposit:/tmp
+

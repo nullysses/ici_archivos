@@ -1,0 +1,55 @@
+---
+name: ici-archivos
+
+services:
+  postgres:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in infra/compose/.env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in infra/compose/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in infra/compose/.env}
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - 127.0.0.1:5432:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8.2.1-alpine3.22
+    command: [redis-server, --appendonly, "yes"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - 127.0.0.1:6379:6379
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in infra/compose/.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in infra/compose/.env}
+    healthcheck:
+      test: [CMD, curl, -f, http://127.0.0.1:9000/minio/health/live]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - 127.0.0.1:9000:9000
+      - 127.0.0.1:9001:9001
+    volumes:
+      - minio_data:/data
+
+volumes:
+  minio_data:
+  postgres_data:
+  redis_data:
+

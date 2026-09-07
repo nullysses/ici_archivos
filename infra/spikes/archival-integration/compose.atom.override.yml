@@ -1,0 +1,46 @@
+---
+networks:
+  archival_integration:
+    name: ici-archival-integration
+    external: true
+
+volumes:
+  sword_deposit:
+    name: ici-archival-integration-sword
+    external: true
+
+services:
+  atom:
+    networks:
+      - default
+      - archival_integration
+    volumes:
+      - sword_deposit:/tmp
+
+  atom_worker:
+    networks:
+      - default
+      - archival_integration
+    volumes:
+      - sword_deposit:/tmp
+
+  nginx:
+    # The upstream development compose file uses nginx:latest.
+    image: nginx:1.29.1
+    networks:
+      default: {}
+      archival_integration:
+        aliases:
+          - atom
+
+  percona:
+    # AtoM supports MySQL/Percona 8.0+. Match Archivematica's pinned image.
+    image: percona/percona-server:8.0.43-34
+
+  memcached:
+    # The upstream development compose file otherwise uses an implicit latest.
+    image: memcached:1.6.39-alpine
+
+  gearmand:
+    # Match the exact image used by the pinned Archivematica compose file.
+    image: artefactual/gearmand:1.1.22-alpine

@@ -1,0 +1,19 @@
+{
+  "name": "@ici/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ici/config": "workspace:*",
+    "bullmq": "6.3.4",
+    "ioredis": "5.8.2"
+  },
+  "devDependencies": { "tsx": "4.23.13" }
+}
+

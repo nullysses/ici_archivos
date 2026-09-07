@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPIKE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENDOR_DIR="${SPIKE_DIR}/.vendor"
+STATE_DIR="${SPIKE_DIR}/.state"
+ATOM_DIR="${VENDOR_DIR}/atom"
+ARCHIVEMATICA_DIR="${VENDOR_DIR}/archivematica"
+ATOM_COMPOSE=(docker compose --project-name ici-atom-spike
+  -f "${ATOM_DIR}/docker/docker-compose.dev.yml"
+  -f "${SPIKE_DIR}/compose.atom.override.yml")
+ARCHIVEMATICA_COMPOSE=(docker compose --project-name ici-am-spike
+  -f "${ARCHIVEMATICA_DIR}/hack/docker-compose.yml"
+  -f "${SPIKE_DIR}/compose.archivematica.override.yml")
+
+# shellcheck source=../versions.env
+source "${SPIKE_DIR}/versions.env"
+if [[ -f "${SPIKE_DIR}/.env" ]]; then
+  # shellcheck source=/dev/null
+  source "${SPIKE_DIR}/.env"
+fi
+
+ATOM_URL="${ATOM_URL:-http://127.0.0.1:63001}"
+ARCHIVEMATICA_URL="${ARCHIVEMATICA_URL:-http://127.0.0.1:62080}"
+STORAGE_SERVICE_URL="${STORAGE_SERVICE_URL:-http://127.0.0.1:62081}"
+ATOM_API_KEY="${ATOM_API_KEY:-}"
+ARCHIVEMATICA_API_USERNAME="${ARCHIVEMATICA_API_USERNAME:-test}"
+ARCHIVEMATICA_API_KEY="${ARCHIVEMATICA_API_KEY:-test}"
+STORAGE_SERVICE_API_USERNAME="${STORAGE_SERVICE_API_USERNAME:-test}"
+STORAGE_SERVICE_API_KEY="${STORAGE_SERVICE_API_KEY:-test}"
+ARCHIVEMATICA_PROCESSING_CONFIG="${ARCHIVEMATICA_PROCESSING_CONFIG:-ici-mvp}"
+SPIKE_RUN_ID="${SPIKE_RUN_ID:-ici-2026-000001}"
+SPIKE_POLL_INTERVAL_SECONDS="${SPIKE_POLL_INTERVAL_SECONDS:-10}"
+SPIKE_POLL_TIMEOUT_SECONDS="${SPIKE_POLL_TIMEOUT_SECONDS:-1800}"
+RUN_DIR="${STATE_DIR}/runs/${SPIKE_RUN_ID}"
+
+log() {
+  printf '[archival-spike] %s\n' "$*"
+}
+
+fail() {
+  printf '[archival-spike] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+}
+
+require_runtime() {
+  local command_name
+  for command_name in git docker make curl jq base64; do
+    require_command "${command_name}"
+  done
+  docker compose version >/dev/null
+  docker info >/dev/null 2>&1 || fail 'Docker daemon is not reachable.'
+}
+
+require_sources() {
+  [[ -d "${ATOM_DIR}/.git" ]] || fail 'Pinned AtoM source is missing; run make fetch.'
+  [[ -d "${ARCHIVEMATICA_DIR}/.git" ]] || fail 'Pinned Archivematica source is missing; run make fetch.'
+}
+
+validate_run_id() {
+  [[ "${SPIKE_RUN_ID}" =~ ^[a-zA-Z0-9._-]+$ ]] ||
+    fail 'SPIKE_RUN_ID may contain only letters, digits, dots, underscores, and hyphens.'
+  [[ "${SPIKE_POLL_INTERVAL_SECONDS}" =~ ^[1-9][0-9]*$ ]] ||
+    fail 'SPIKE_POLL_INTERVAL_SECONDS must be a positive integer.'
+  [[ "${SPIKE_POLL_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] ||
+    fail 'SPIKE_POLL_TIMEOUT_SECONDS must be a positive integer.'
+}
+
+verify_commit() {
+  local repository_dir="$1"
+  local expected_commit="$2"
+  local label="$3"
+  local actual_commit
+  actual_commit="$(git -C "${repository_dir}" rev-parse HEAD)"
+  [[ "${actual_commit}" == "${expected_commit}" ]] ||
+    fail "${label} commit mismatch: expected ${expected_commit}, found ${actual_commit}"
+}
+
+fetch_repository() {
+  local repository="$1"
+  local tag="$2"
+  local commit="$3"
+  local destination="$4"
+  local label="$5"
+  shift 5
+
+  if [[ ! -d "${destination}/.git" ]]; then
+    log "Fetching ${label} ${tag}..."
+    git clone --depth 1 --branch "${tag}" "$@" "${repository}" "${destination}"
+  fi
+  verify_commit "${destination}" "${commit}" "${label}"
+}
+
+fetch_sources() {
+  require_command git
+  mkdir -p "${VENDOR_DIR}"
+  fetch_repository "${ATOM_REPOSITORY}" "${ATOM_TAG}" "${ATOM_COMMIT}" \
+    "${ATOM_DIR}" AtoM
+  fetch_repository "${ARCHIVEMATICA_REPOSITORY}" "${ARCHIVEMATICA_TAG}" \
+    "${ARCHIVEMATICA_COMMIT}" "${ARCHIVEMATICA_DIR}" Archivematica
+  git -C "${ARCHIVEMATICA_DIR}" submodule update --init --depth 1 \
+    hack/submodules/archivematica-storage-service \
+    hack/submodules/archivematica-sampledata
+  verify_commit \
+    "${ARCHIVEMATICA_DIR}/hack/submodules/archivematica-storage-service" \
+    "${STORAGE_SERVICE_COMMIT}" 'Archivematica Storage Service'
+  verify_commit \
+    "${ARCHIVEMATICA_DIR}/hack/submodules/archivematica-sampledata" \
+    "${SAMPLEDATA_COMMIT}" 'Archivematica sample data'
+  log 'Pinned source commits verified.'
+}
+
+ensure_shared_resources() {
+  docker network inspect ici-archival-integration >/dev/null 2>&1 ||
+    docker network create ici-archival-integration >/dev/null
+  docker volume inspect ici-archival-integration-sword >/dev/null 2>&1 ||
+    docker volume create ici-archival-integration-sword >/dev/null
+  docker run --rm \
+    --volume ici-archival-integration-sword:/sword \
+    "${UTILITY_IMAGE}" chmod 1777 /sword
+}
+
+bootstrap_atom() {
+  log 'Building and starting AtoM dependencies...'
+  "${ATOM_COMPOSE[@]}" up -d --build percona elasticsearch memcached gearmand
+  log 'Installing a development-only AtoM database...'
+  "${ATOM_COMPOSE[@]}" run --rm atom php symfony tools:install \
+    --database-host=percona \
+    --database-port=3306 \
+    --database-name=atom \
+    --database-user=atom \
+    --database-password=atom_12345 \
+    --search-host=elasticsearch \
+    --search-port=9200 \
+    --search-index=atom \
+    --demo \
+    --no-confirmation
+  "${ATOM_COMPOSE[@]}" run --rm atom php symfony tools:atom-plugins add arRestApiPlugin
+  "${ATOM_COMPOSE[@]}" run --rm atom php symfony tools:atom-plugins add qtSwordPlugin
+  "${ATOM_COMPOSE[@]}" up -d --build atom atom_worker nginx
+}
+
+bootstrap_archivematica() {
+  local pipeline_data="${STATE_DIR}/am-pipeline-data"
+  local location_data="${STATE_DIR}/ss-location-data"
+  mkdir -p "${pipeline_data}" "${location_data}"
+  log 'Creating Archivematica development volumes...'
+  COMPOSE_PROJECT_NAME=ici-am-spike make -C "${ARCHIVEMATICA_DIR}/hack" \
+    AM_PIPELINE_DATA="${pipeline_data}" \
+    SS_LOCATION_DATA="${location_data}" \
+    create-volumes
+  log 'Building pinned Archivematica and Storage Service sources...'
+  COMPOSE_PROJECT_NAME=ici-am-spike make -C "${ARCHIVEMATICA_DIR}/hack" build
+  "${ARCHIVEMATICA_COMPOSE[@]}" up -d
+  log 'Initializing development-only Archivematica databases...'
+  COMPOSE_PROJECT_NAME=ici-am-spike make -C "${ARCHIVEMATICA_DIR}/hack" bootstrap
+  COMPOSE_PROJECT_NAME=ici-am-spike make -C "${ARCHIVEMATICA_DIR}/hack" restart-am-services
+}
+
+bootstrap_all() {
+  [[ "${1:-}" == '--confirm-reset' ]] ||
+    fail 'Bootstrap resets vendor databases. Re-run with --confirm-reset.'
+  require_runtime
+  fetch_sources
+  ensure_shared_resources
+  mkdir -p "${STATE_DIR}"
+  bootstrap_atom
+  bootstrap_archivematica
+  date -u +'%Y-%m-%dT%H:%M:%SZ' >"${STATE_DIR}/bootstrapped-at"
+  log 'Bootstrap complete. Follow README.md one-time vendor configuration next.'
+}
+
+up_all() {
+  require_runtime
+  require_sources
+  [[ -f "${STATE_DIR}/bootstrapped-at" ]] || fail 'Spike has not been bootstrapped.'
+  ensure_shared_resources
+  "${ATOM_COMPOSE[@]}" up -d
+  "${ARCHIVEMATICA_COMPOSE[@]}" up -d
+}
+
+require_api_configuration() {
+  [[ -n "${ATOM_API_KEY}" ]] ||
+    fail 'ATOM_API_KEY is empty. Generate it in AtoM and add it to .env.'
+}
+
+api_get() {
+  local url="$1"
+  local auth_header="$2"
+  curl --fail-with-body --silent --show-error \
+    -H "${auth_header}" \
+    -H 'Accept: application/json' \
+    "${url}"
+}
+
+preflight() {
+  require_runtime
+  require_sources
+  require_api_configuration
+  log 'Checking AtoM REST API...'
+  api_get "${ATOM_URL}/api/informationobjects?limit=1" \
+    "REST-API-Key: ${ATOM_API_KEY}" >/dev/null
+  log 'Checking Archivematica API...'
+  api_get "${ARCHIVEMATICA_URL}/api/transfer/completed/" \
+    "Authorization: ApiKey ${ARCHIVEMATICA_API_USERNAME}:${ARCHIVEMATICA_API_KEY}" >/dev/null
+  log 'Checking Storage Service API...'
+  api_get "${STORAGE_SERVICE_URL}/api/v2/location/?limit=1" \
+    "Authorization: ApiKey ${STORAGE_SERVICE_API_USERNAME}:${STORAGE_SERVICE_API_KEY}" >/dev/null
+  log "Checking Archivematica processing profile ${ARCHIVEMATICA_PROCESSING_CONFIG}..."
+  api_get "${ARCHIVEMATICA_URL}/api/processing-configuration/${ARCHIVEMATICA_PROCESSING_CONFIG}" \
+    "Authorization: ApiKey ${ARCHIVEMATICA_API_USERNAME}:${ARCHIVEMATICA_API_KEY}" >/dev/null
+  log 'Preflight passed.'
+}
+
+atom_create_node() {
+  local filename="$1"
+  local identifier="$2"
+  local title="$3"
+  local level="$4"
+  local parent_slug="${5:-}"
+  local output="${RUN_DIR}/${filename}.json"
+  local payload
+
+  if [[ -f "${output}" ]]; then
+    jq -er '.slug' "${output}"
+    return
+  fi
+
+  if [[ -n "${parent_slug}" ]]; then
+    payload="$(jq -n \
+      --arg identifier "${identifier}" \
+      --arg title "${title}" \
+      --arg level "${level}" \
+      --arg parent_slug "${parent_slug}" \
+      '{identifier:$identifier,title:$title,description:"ICI integration feasibility spike",level_of_description:$level,parent_slug:$parent_slug}')"
+  else
+    payload="$(jq -n \
+      --arg identifier "${identifier}" \
+      --arg title "${title}" \
+      --arg level "${level}" \
+      '{identifier:$identifier,title:$title,description:"ICI integration feasibility spike",level_of_description:$level}')"
+  fi
+
+  curl --fail-with-body --silent --show-error \
+    -X POST "${ATOM_URL}/api/informationobjects" \
+    -H 'Content-Type: application/json' \
+    -H "REST-API-Key: ${ATOM_API_KEY}" \
+    --data "${payload}" >"${output}"
+  jq -er '.slug' "${output}"
+}
+
+create_hierarchy() {
+  require_command curl
+  require_command jq
+  require_api_configuration
+  validate_run_id
+  mkdir -p "${RUN_DIR}"
+  local fonds_slug section_slug series_slug expediente_slug
+  fonds_slug="$(atom_create_node fonds "ICI-${SPIKE_RUN_ID}-F" \
+    'ICI feasibility fonds' Fonds)"
+  section_slug="$(atom_create_node section "ICI-${SPIKE_RUN_ID}-S" \
+    'ICI feasibility section' Section "${fonds_slug}")"
+  series_slug="$(atom_create_node series "ICI-${SPIKE_RUN_ID}-SR" \
+    'ICI feasibility series' Series "${section_slug}")"
+  expediente_slug="$(atom_create_node expediente "EXP-${SPIKE_RUN_ID}" \
+    'ICI feasibility expediente' File "${series_slug}")"
+  printf '%s\n' "${expediente_slug}" >"${RUN_DIR}/atom-target-slug"
+  log "AtoM target created: ${ATOM_URL}/${expediente_slug}"
+}
+
+submit_transfer() {
+  require_command curl
+  require_command jq
+  require_command base64
+  validate_run_id
+  [[ -f "${RUN_DIR}/atom-target-slug" ]] || fail 'Create the AtoM hierarchy first.'
+  [[ ! -f "${RUN_DIR}/transfer-submit.json" ]] ||
+    fail 'This run ID was already submitted. Choose a new SPIKE_RUN_ID to avoid duplicate preservation transfers.'
+
+  local transfer_name="ici-spike-${SPIKE_RUN_ID}"
+  local source_host="${STATE_DIR}/ss-location-data/archivematica/${transfer_name}"
+  local source_container="/home/archivematica/${transfer_name}"
+  local encoded_path target_slug payload
+  mkdir -p "${source_host}/objects"
+  cp "${SPIKE_DIR}/fixtures/expediente.txt" "${source_host}/objects/expediente.txt"
+  encoded_path="$(printf '%s' "${source_container}" | base64 | tr -d '\n')"
+  target_slug="$(<"${RUN_DIR}/atom-target-slug")"
+  payload="$(jq -n \
+    --arg name "${transfer_name}" \
+    --arg path "${encoded_path}" \
+    --arg processing_config "${ARCHIVEMATICA_PROCESSING_CONFIG}" \
+    --arg access_system_id "${target_slug}" \
+    '{name:$name,path:$path,type:"standard",processing_config:$processing_config,access_system_id:$access_system_id,auto_approve:true}')"
+
+  curl --fail-with-body --silent --show-error \
+    -X POST "${ARCHIVEMATICA_URL}/api/v2beta/package" \
+    -H "Authorization: ApiKey ${ARCHIVEMATICA_API_USERNAME}:${ARCHIVEMATICA_API_KEY}" \
+    -H 'Content-Type: application/json' \
+    --data "${payload}" >"${RUN_DIR}/transfer-submit.json"
+  jq -er '.id' "${RUN_DIR}/transfer-submit.json" >"${RUN_DIR}/transfer-uuid"
+  log "Transfer submitted: $(<"${RUN_DIR}/transfer-uuid")"
+}
+
+poll_unit() {
+  local unit_type="$1"
+  local unit_uuid="$2"
+  local output="$3"
+  local require_sip_uuid="${4:-false}"
+  local started now status
+  started="$(date +%s)"
+
+  while true; do
+    api_get "${ARCHIVEMATICA_URL}/api/${unit_type}/status/${unit_uuid}/" \
+      "Authorization: ApiKey ${ARCHIVEMATICA_API_USERNAME}:${ARCHIVEMATICA_API_KEY}" \
+      >"${output}"
+    status="$(jq -er '.status' "${output}")"
+    log "${unit_type} ${unit_uuid}: ${status} ($(jq -r '.microservice // "unknown step"' "${output}"))"
+    case "${status}" in
+      COMPLETE)
+        if [[ "${require_sip_uuid}" == true ]] &&
+          ! jq -e '.sip_uuid != null and .sip_uuid != "BACKLOG"' "${output}" >/dev/null; then
+          log 'Transfer is complete but its SIP UUID is not available yet; polling again.'
+        else
+          return 0
+        fi
+        ;;
+      FAILED|REJECTED) return 1 ;;
+      USER_INPUT) return 2 ;;
+    esac
+    now="$(date +%s)"
+    (( now - started < SPIKE_POLL_TIMEOUT_SECONDS )) || return 3
+    sleep "${SPIKE_POLL_INTERVAL_SECONDS}"
+  done
+}
+
+poll_status() {
+  require_command curl
+  require_command jq
+  validate_run_id
+  [[ -f "${RUN_DIR}/transfer-uuid" ]] || fail 'No submitted transfer exists for this run ID.'
+  local transfer_uuid sip_uuid
+  transfer_uuid="$(<"${RUN_DIR}/transfer-uuid")"
+  poll_unit transfer "${transfer_uuid}" "${RUN_DIR}/transfer-status.json" true ||
+    fail 'Transfer failed, needs user input, or timed out; inspect the saved status and dashboard.'
+  sip_uuid="$(jq -er 'select(.sip_uuid != null and .sip_uuid != "BACKLOG") | .sip_uuid' \
+    "${RUN_DIR}/transfer-status.json")" ||
+    fail 'Transfer completed without a usable SIP UUID.'
+  printf '%s\n' "${sip_uuid}" >"${RUN_DIR}/sip-uuid"
+  poll_unit ingest "${sip_uuid}" "${RUN_DIR}/ingest-status.json" ||
+    fail 'Ingest failed, needs user input, or timed out; inspect the saved status and dashboard.'
+  log 'Transfer and ingest completed.'
+}
+
+verify_result() {
+  require_command curl
+  require_command jq
+  require_api_configuration
+  [[ -f "${RUN_DIR}/sip-uuid" ]] || fail 'No completed ingest exists for this run ID.'
+  local sip_uuid target_slug first_child_slug
+  sip_uuid="$(<"${RUN_DIR}/sip-uuid")"
+  target_slug="$(<"${RUN_DIR}/atom-target-slug")"
+
+  api_get "${ARCHIVEMATICA_URL}/api/v2beta/jobs/${sip_uuid}/?detailed" \
+    "Authorization: ApiKey ${ARCHIVEMATICA_API_USERNAME}:${ARCHIVEMATICA_API_KEY}" \
+    >"${RUN_DIR}/ingest-jobs.json"
+  jq -e '[.[] | select(.microservice == "Store AIP" and .status == "COMPLETE")] | length > 0' \
+    "${RUN_DIR}/ingest-jobs.json" >/dev/null || fail 'A completed Store AIP job was not found.'
+  jq -e '[.[] | select((((.name // "") + " " + (.microservice // "")) | ascii_downcase | contains("upload dip")) and .status == "COMPLETE")] | length > 0' \
+    "${RUN_DIR}/ingest-jobs.json" >/dev/null || fail 'A completed DIP upload job was not found.'
+
+  api_get "${ATOM_URL}/api/informationobjects/tree/${target_slug}" \
+    "REST-API-Key: ${ATOM_API_KEY}" >"${RUN_DIR}/atom-tree.json"
+  first_child_slug="$(jq -er '.children[0].slug' "${RUN_DIR}/atom-tree.json")" ||
+    fail 'AtoM target has no Item child after hierarchical DIP upload.'
+  curl --fail-with-body --silent --show-error \
+    -H "REST-API-Key: ${ATOM_API_KEY}" \
+    "${ATOM_URL}/api/informationobjects/${first_child_slug}/digitalobject" \
+    --output "${RUN_DIR}/downloaded-digital-object"
+  [[ -s "${RUN_DIR}/downloaded-digital-object" ]] || fail 'Downloaded AtoM digital object is empty.'
+  log "Verified stored AIP, DIP upload, AtoM Item, and digital object for ${SPIKE_RUN_ID}."
+}
+
+check_local() {
+  local shell_file
+  for shell_file in "${SCRIPT_DIR}"/*; do
+    [[ -f "${shell_file}" ]] || continue
+    bash -n "${shell_file}"
+  done
+  local command_name
+  for command_name in git make curl jq base64; do
+    require_command "${command_name}"
+  done
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    log 'Docker CLI and Compose plugin found.'
+  else
+    log 'Docker with Compose is unavailable; runtime verification is currently unavailable.'
+  fi
+  log 'Local static checks passed.'
+}
+
+show_logs() {
+  require_runtime
+  require_sources
+  "${ATOM_COMPOSE[@]}" logs --tail=100 atom atom_worker nginx
+  "${ARCHIVEMATICA_COMPOSE[@]}" logs --tail=100 \
+    archivematica-dashboard archivematica-mcp-client archivematica-mcp-server \
+    archivematica-storage-service
+}
+
+command_name="${1:-help}"
+shift || true
+case "${command_name}" in
+  check) check_local ;;
+  fetch) fetch_sources ;;
+  bootstrap) bootstrap_all "$@" ;;
+  up) up_all ;;
+  preflight) preflight ;;
+  hierarchy) create_hierarchy ;;
+  transfer) submit_transfer ;;
+  status) poll_status ;;
+  verify) verify_result ;;
+  logs) show_logs ;;
+  help|-h|--help)
+    exec make -C "${SPIKE_DIR}" help
+    ;;
+  *) fail "Unknown command: ${command_name}" ;;
+esac

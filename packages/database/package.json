@@ -9,9 +9,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ici/domain": "workspace:*",
+    "ajv": "8.20.0",
     "kysely": "0.29.5",
     "pg": "8.23.0"
   },
   "devDependencies": { "@types/pg": "8.20.0" }
 }
-

@@ -139,6 +139,12 @@ importers:
 
   packages/database:
     dependencies:
+      '@ici/domain':
+        specifier: workspace:*
+        version: link:../domain
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
       kysely:
         specifier: 0.29.5
         version: 0.29.5

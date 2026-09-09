@@ -37,7 +37,7 @@ export async function applyFoundationMigrations(database: Database): Promise<voi
     await sql`select pg_advisory_xact_lock(hashtext('ici_archivos.foundation_migrations'))`.execute(transaction);
     const applied = await transaction.selectFrom('ici_schema_migrations').select('id').execute();
     const appliedIds = new Set(applied.map((row) => row.id));
-    const migrations = ['001_foundation', '002_foundation_hardening', '003_persistence_foundation', '004_step4b_review_hardening'] as const;
+    const migrations = ['001_foundation', '002_foundation_hardening', '003_persistence_foundation', '004_step4b_review_hardening', '005_matter_workflow', '006_oidc_identity_lookup'] as const;
     for (const migrationId of migrations) {
       if (appliedIds.has(migrationId)) continue;
       const migration = await readFile(new URL(`../migrations/${migrationId}.sql`, import.meta.url), 'utf8');
@@ -49,6 +49,12 @@ export async function applyFoundationMigrations(database: Database): Promise<voi
 
 export async function setInstitutionContext(executor: DatabaseTransaction, institution: InstitutionId | string): Promise<void> {
   await sql`select set_config('app.institution_id', ${institution}, true)`.execute(executor);
+}
+
+export async function resolveExternalIdentity(database: Database, issuer: string, subject: string): Promise<{ readonly institutionId: string; readonly userId: string; readonly status: string } | undefined> {
+  const result = await sql<{ institution_id: string; user_id: string; user_status: string }>`select * from ici_resolve_external_identity(${issuer}, ${subject})`.execute(database);
+  const row = result.rows[0];
+  return row === undefined ? undefined : { institutionId: row.institution_id, userId: row.user_id, status: row.user_status };
 }
 
 /** Context is transaction-local, so a released pool connection never retains it. */
@@ -175,7 +181,7 @@ export async function assertApplicationRoleIsRlsSafe(database: DatabaseExecutor,
 export async function assertTenantTablesUseForcedRls(database: DatabaseExecutor): Promise<void> {
   const expectedTenantTables = [
     'organizational_units', 'users', 'external_identities', 'user_role_assignments',
-    'folio_counters', 'matters', 'matter_assignments', 'matter_state_events',
+    'folio_counters', 'matters', 'matter_assignments', 'matter_state_events', 'matter_notes',
     'expediente_types', 'expediente_type_versions', 'expedientes', 'expediente_state_events',
     'access_classifications', 'documents', 'document_versions', 'malware_scans',
     'archival_classification_nodes', 'atom_mappings', 'archive_transfers', 'transfer_manifests',

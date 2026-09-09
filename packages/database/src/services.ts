@@ -259,6 +259,16 @@ export async function linkMatterToExpedienteAtomically(database: Database, input
   });
 }
 
+export async function addMatterNoteAtomically(database: Database, input: { readonly id: string; readonly institutionId: InstitutionId | string; readonly matterId: string; readonly authorUserId: string; readonly content: string; readonly noteType?: 'NOTE' | 'RESPONSE'; readonly correlationId: string }): Promise<void> {
+  if (input.content.trim().length === 0 || input.content.length > 10_000) throw new DomainInvariantError('INVALID_NOTE', 'A note must contain at most 10,000 characters');
+  await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.authorUserId, eventType: 'matter.note_added', aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, eventData: { noteId: input.id, noteType: input.noteType ?? 'NOTE' } }, async (transaction) => {
+    const matter = await transaction.selectFrom('matters').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).executeTakeFirst();
+    if (matter === undefined) throw new Error('Matter not found');
+    if (matter.status === 'CLOSED' || matter.status === 'VOIDED') throw new DomainInvariantError('INVALID_TRANSITION', 'Notes cannot be added to terminal matters');
+    await transaction.insertInto('matter_notes').values({ id: input.id, institution_id: input.institutionId, matter_id: input.matterId, author_user_id: input.authorUserId, note_type: input.noteType ?? 'NOTE', content: input.content }).execute();
+  });
+}
+
 export async function persistExpedienteTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
   assertTransition(input.command, input.fromStatus, input.toStatus, expedienteTransitions);
   const reason = input.command === 'reopenExpediente' || input.command === 'rejectTransfer' || input.command === 'voidExpediente' ? requireReason(input.reason, input.command) : input.reason;

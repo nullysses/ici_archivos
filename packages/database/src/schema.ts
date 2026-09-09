@@ -98,6 +98,8 @@ export interface MattersTable {
   resolution_metadata: Nullable<JsonObject>;
   closure_metadata: Nullable<JsonObject>;
   created_by: Nullable<string>;
+  destination_unit_id: Nullable<string>;
+  access_classification_id: Nullable<string>;
   created_at: Timestamp;
   updated_at: Timestamp;
 }
@@ -123,6 +125,16 @@ export interface MatterStateEventsTable {
   reason: Nullable<string>;
   event_data: JsonColumn;
   occurred_at: Timestamp;
+}
+
+export interface MatterNotesTable {
+  id: Generated<string>;
+  institution_id: string;
+  matter_id: string;
+  author_user_id: string;
+  note_type: 'NOTE' | 'RESPONSE';
+  content: string;
+  created_at: Timestamp;
 }
 
 export interface ExpedienteTypesTable {
@@ -165,7 +177,7 @@ export interface ExpedientesTable {
 export interface ExpedienteStateEventsTable {
   id: Generated<string>;
   institution_id: string;
-  expediente_id: string;
+  expediente_id: Nullable<string>;
   from_status: Nullable<'OPEN' | 'CLOSED' | 'TRANSFER_PENDING' | 'TRANSFERRED' | 'VOIDED'>;
   to_status: 'OPEN' | 'CLOSED' | 'TRANSFER_PENDING' | 'TRANSFERRED' | 'VOIDED';
   command: string;
@@ -192,6 +204,7 @@ export interface DocumentsTable {
   id: Generated<string>;
   institution_id: string;
   expediente_id: string;
+  matter_id: Nullable<string>;
   document_type: string;
   title: string;
   current_version_id: Nullable<string>;
@@ -342,6 +355,7 @@ export interface DatabaseSchema {
   matters: MattersTable;
   matter_assignments: MatterAssignmentsTable;
   matter_state_events: MatterStateEventsTable;
+  matter_notes: MatterNotesTable;
   expediente_types: ExpedienteTypesTable;
   expediente_type_versions: ExpedienteTypeVersionsTable;
   expedientes: ExpedientesTable;

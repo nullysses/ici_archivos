@@ -4,6 +4,7 @@ import type { ArchiveTransferState, ExpedienteMetadataValidator, JsonObject, Jso
 import { DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantTransaction } from './index.js';
+import type { AuthorizationContext } from './permissions.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
   registerMatter: { from: [], to: 'RECEIVED' },
@@ -73,12 +74,6 @@ function isJsonObject(value: JsonValue): value is JsonObject {
 function objectEventValue(data: JsonObject | undefined, key: string): JsonObject | undefined {
   const value: JsonValue | undefined = data?.[key];
   return value !== undefined && isJsonObject(value) ? value : undefined;
-}
-
-function stringArrayEventValue(data: JsonObject | undefined, key: string): readonly string[] {
-  const value = data?.[key];
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) return [];
-  return value;
 }
 
 function requireReason(reason: string | undefined, command: string): string {
@@ -172,6 +167,8 @@ export interface StateTransitionPersistenceInput {
   readonly toStatus: string;
   readonly reason?: string;
   readonly eventData?: JsonObject;
+  /** Trusted, server-derived context. Required for startMatter unit-scope checks. */
+  readonly authorizationContext?: AuthorizationContext;
 }
 
 export interface MatterAssignmentPersistenceInput {
@@ -204,6 +201,7 @@ export async function assignMatterAtomically(database: Database, input: MatterAs
 
 export async function persistMatterTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
   assertTransition(input.command, input.fromStatus, input.toStatus, matterTransitions);
+  if (input.command === 'startMatter' && input.eventData?.authorizedUnitIds !== undefined) throw new DomainInvariantError('INVALID_AUTHORIZATION_EVIDENCE', 'Authorization evidence must not be supplied in event data');
   const reason = input.command === 'reopenMatter' || input.command === 'voidMatter' ? requireReason(input.reason, input.command) : input.reason;
   await withAuditedTenantTransaction(database, {
     institutionId: input.institutionId,
@@ -222,9 +220,10 @@ export async function persistMatterTransition(database: Database, input: StateTr
     const changes: { status: MatterState; updated_at: Date; resolution_metadata?: JsonObject; closure_metadata?: JsonObject; linked_expediente_id?: string } = { status: input.toStatus as MatterState, updated_at: new Date() };
     if (input.command === 'startMatter') {
       if (input.actorUserId === undefined) throw new DomainInvariantError('ACTOR_REQUIRED', 'startMatter requires an actor');
+      const authorization = input.authorizationContext;
+      if (authorization === undefined || authorization.institutionId !== input.institutionId || authorization.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'startMatter requires matching server-derived authorization context');
       const assignment = await transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id']).where('institution_id', '=', input.institutionId).where('matter_id', '=', input.aggregateId).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
-      const authorizedUnitIds = stringArrayEventValue(input.eventData, 'authorizedUnitIds');
-      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !authorizedUnitIds.includes(assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or an authorized member of the assigned unit');
+      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !authorization.authorizedUnitIds.has(assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or an authorized member of the assigned unit');
     }
     if (input.command === 'resolveMatter') {
       const resolution = objectEventValue(input.eventData, 'resolutionMetadata');

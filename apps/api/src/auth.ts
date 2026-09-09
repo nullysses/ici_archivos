@@ -1,12 +1,14 @@
 import type { Database } from '@ici/database';
-import { resolveEffectivePermissions, resolveExternalIdentity, withTenantTransaction } from '@ici/database';
+import { resolveAuthorizationContext, resolveExternalIdentity, withTenantTransaction } from '@ici/database';
+import type { Capability } from '@ici/database';
 
 export interface AuthenticatedPrincipal {
   readonly userId: string;
   readonly institutionId: string;
   readonly issuer: string;
   readonly subject: string;
-  readonly permissions: ReadonlySet<string>;
+  readonly permissions: ReadonlySet<Capability>;
+  readonly authorizedUnitIds: ReadonlySet<string>;
 }
 
 export interface AccessTokenVerifier {
@@ -18,6 +20,6 @@ export async function authenticateAccessToken(database: Database, verifier: Acce
   const token = await verifier.verify(accessToken);
   const identity = await resolveExternalIdentity(database, token.issuer, token.subject);
   if (identity === undefined || identity.status !== 'ACTIVE') throw new Error('UNAUTHENTICATED');
-  const permissions = await withTenantTransaction(database, identity.institutionId, (tx) => resolveEffectivePermissions(tx, identity.institutionId, identity.userId));
-  return { userId: identity.userId, institutionId: identity.institutionId, issuer: token.issuer, subject: token.subject, permissions };
+  const authorization = await withTenantTransaction(database, identity.institutionId, (tx) => resolveAuthorizationContext(tx, identity.institutionId, identity.userId));
+  return { userId: identity.userId, institutionId: identity.institutionId, issuer: token.issuer, subject: token.subject, permissions: authorization.capabilities, authorizedUnitIds: authorization.authorizedUnitIds };
 }

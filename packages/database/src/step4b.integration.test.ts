@@ -4,13 +4,17 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { sql } from 'kysely';
 import {
   appendAuditEvent,
+  assignMatterAtomically,
   applyFoundationMigrations,
   approveTransferAndManifestAtomically,
   createDatabase,
   createDocumentVersionMetadataAtomically,
   createExpedienteSchemaValidator,
   developmentSeedIds,
+  persistMatterTransition,
   publishExpedienteTypeVersionAtomically,
+  registerMatterAtomically,
+  resolveAuthorizationContext,
   resolveEffectivePermissions,
   seedDevelopmentReferenceData,
   tenantRepositories,
@@ -151,6 +155,106 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       expect(union.has('identity.manage')).toBe(true);
       expect(union.has('archive_transfer.approve')).toBe(false);
       expect((await resolveEffectivePermissions(tx, institutionB, developmentSeedIds.adminUser, authorizationTime)).size).toBe(0);
+    });
+  });
+
+  it('resolves active authorized-unit scope separately from capabilities under RLS', async () => {
+    const user = '90000000-0000-4000-8000-000000000100';
+    const nullUnitUser = '90000000-0000-4000-8000-000000000101';
+    const firstUnit = '90000000-0000-4000-8000-000000000102';
+    const secondUnit = '90000000-0000-4000-8000-000000000103';
+    const otherInstitutionUser = '90000000-0000-4000-8000-000000000104';
+    const otherInstitutionUnit = '90000000-0000-4000-8000-000000000105';
+    const gestorRole = '10000000-0000-4000-8000-000000000003';
+    const at = new Date('2026-09-10T00:00:00.000Z');
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      await tx.insertInto('organizational_units').values([
+        { id: firstUnit, institution_id: institutionA, code: 'SCOPE-A', name: 'Scope A', status: 'ACTIVE' },
+        { id: secondUnit, institution_id: institutionA, code: 'SCOPE-B', name: 'Scope B', status: 'ACTIVE' },
+      ]).execute();
+      await tx.insertInto('users').values([
+        { id: user, institution_id: institutionA, display_name: 'Scoped user', status: 'ACTIVE' },
+        { id: nullUnitUser, institution_id: institutionA, display_name: 'Unscoped user', status: 'ACTIVE' },
+      ]).execute();
+      await tx.insertInto('user_role_assignments').values([
+        { id: '90000000-0000-4000-8000-000000000110', institution_id: institutionA, user_id: user, role_id: gestorRole, unit_id: firstUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000111', institution_id: institutionA, user_id: user, role_id: gestorRole, unit_id: secondUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000112', institution_id: institutionA, user_id: user, role_id: gestorRole, unit_id: firstUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000113', institution_id: institutionA, user_id: user, role_id: gestorRole, unit_id: firstUnit, effective_from: new Date('2026-09-01T00:00:00.000Z'), effective_until: new Date('2026-09-09T00:00:00.000Z') },
+        { id: '90000000-0000-4000-8000-000000000114', institution_id: institutionA, user_id: user, role_id: gestorRole, unit_id: firstUnit, effective_from: new Date('2026-09-11T00:00:00.000Z') },
+        { id: '90000000-0000-4000-8000-000000000115', institution_id: institutionA, user_id: nullUnitUser, role_id: gestorRole, effective_from: fixedNow },
+      ]).execute();
+      const context = await resolveAuthorizationContext(tx, institutionA, user, at);
+      expect(context.capabilities.has('matter.start')).toBe(true);
+      expect([...context.authorizedUnitIds].sort()).toEqual([firstUnit, secondUnit]);
+      const nullUnitContext = await resolveAuthorizationContext(tx, institutionA, nullUnitUser, at);
+      expect(nullUnitContext.capabilities.has('matter.start')).toBe(true);
+      expect(nullUnitContext.authorizedUnitIds.size).toBe(0);
+    });
+    await withTenantTransaction(owner(), institutionB, async (tx) => {
+      await tx.insertInto('organizational_units').values({ id: otherInstitutionUnit, institution_id: institutionB, code: 'SCOPE-B', name: 'Other scope', status: 'ACTIVE' }).execute();
+      await tx.insertInto('users').values({ id: otherInstitutionUser, institution_id: institutionB, display_name: 'Other scoped user', status: 'ACTIVE' }).execute();
+      await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000116', institution_id: institutionB, user_id: otherInstitutionUser, role_id: gestorRole, unit_id: otherInstitutionUnit, effective_from: fixedNow }).execute();
+    });
+    await withTenantTransaction(app(), institutionA, async (tx) => expect((await resolveAuthorizationContext(tx, institutionA, otherInstitutionUser, at)).authorizedUnitIds.size).toBe(0));
+    await withTenantTransaction(app(), institutionB, async (tx) => expect((await resolveAuthorizationContext(tx, institutionB, otherInstitutionUser, at)).authorizedUnitIds).toEqual(new Set([otherInstitutionUnit])));
+  });
+
+  it('starts assigned matters for the current assignee or a server-authorized unit member', async () => {
+    const actor = '90000000-0000-4000-8000-000000000120';
+    const otherUser = '90000000-0000-4000-8000-000000000121';
+    const authorizedUnit = '90000000-0000-4000-8000-000000000122';
+    const directMatter = '90000000-0000-4000-8000-000000000123';
+    const unitMatter = '90000000-0000-4000-8000-000000000124';
+    const gestorRole = '10000000-0000-4000-8000-000000000003';
+    const authorizationContext = await withTenantTransaction(app(), institutionA, async (tx) => {
+      await tx.insertInto('organizational_units').values({ id: authorizedUnit, institution_id: institutionA, code: 'START', name: 'Start unit', status: 'ACTIVE' }).execute();
+      await tx.insertInto('users').values([
+        { id: actor, institution_id: institutionA, display_name: 'Actor', status: 'ACTIVE' },
+        { id: otherUser, institution_id: institutionA, display_name: 'Other', status: 'ACTIVE' },
+      ]).execute();
+      await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000125', institution_id: institutionA, user_id: actor, role_id: gestorRole, unit_id: authorizedUnit, effective_from: fixedNow }).execute();
+      return resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
+    });
+    await registerMatterAtomically(app(), { id: directMatter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'direct' }, correlationId: 'fixture-direct', actorUserId: actor, year: 2026 });
+    await registerMatterAtomically(app(), { id: unitMatter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'unit' }, correlationId: 'fixture-unit', actorUserId: actor, year: 2026 });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: directMatter, assignmentId: '90000000-0000-4000-8000-000000000126', unitId: authorizedUnit, userId: actor, actorUserId: actor, correlationId: 'fixture-direct-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: unitMatter, assignmentId: '90000000-0000-4000-8000-000000000127', unitId: authorizedUnit, userId: otherUser, actorUserId: actor, correlationId: 'fixture-unit-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: directMatter, actorUserId: actor, authorizationContext, correlationId: 'start-direct', command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' });
+    await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: unitMatter, actorUserId: actor, authorizationContext, correlationId: 'start-unit', command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' });
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      expect((await tenantRepositories(tx, institutionA).matters.byId(directMatter))?.status).toBe('IN_PROGRESS');
+      expect((await tenantRepositories(tx, institutionA).matters.byId(unitMatter))?.status).toBe('IN_PROGRESS');
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('start-direct')).toHaveLength(1);
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('start-unit')).toHaveLength(1);
+    });
+  });
+
+  it('rejects unscoped and forged startMatter authorization without persisting partial state', async () => {
+    const actor = '90000000-0000-4000-8000-000000000130';
+    const assignee = '90000000-0000-4000-8000-000000000131';
+    const assignedUnit = '90000000-0000-4000-8000-000000000132';
+    const matter = '90000000-0000-4000-8000-000000000133';
+    const gestorRole = '10000000-0000-4000-8000-000000000003';
+    const authorizationContext = await withTenantTransaction(app(), institutionA, async (tx) => {
+      await tx.insertInto('organizational_units').values({ id: assignedUnit, institution_id: institutionA, code: 'DENY', name: 'Denied unit', status: 'ACTIVE' }).execute();
+      await tx.insertInto('users').values([
+        { id: actor, institution_id: institutionA, display_name: 'Unscoped actor', status: 'ACTIVE' },
+        { id: assignee, institution_id: institutionA, display_name: 'Assignee', status: 'ACTIVE' },
+      ]).execute();
+      await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000134', institution_id: institutionA, user_id: actor, role_id: gestorRole, effective_from: fixedNow }).execute();
+      return resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
+    });
+    await registerMatterAtomically(app(), { id: matter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'denied' }, correlationId: 'fixture-denied', actorUserId: actor, year: 2026 });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: matter, assignmentId: '90000000-0000-4000-8000-000000000135', unitId: assignedUnit, userId: assignee, actorUserId: actor, correlationId: 'fixture-denied-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    const baseInput = { institutionId: institutionA, aggregateId: matter, actorUserId: actor, authorizationContext, command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' } as const;
+    await expect(persistMatterTransition(app(), { ...baseInput, correlationId: 'start-denied' })).rejects.toThrow(/not the current assignee/i);
+    await expect(persistMatterTransition(app(), { ...baseInput, correlationId: 'start-forged', eventData: { authorizedUnitIds: [assignedUnit] } })).rejects.toThrow(/must not be supplied in event data/i);
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      expect((await tenantRepositories(tx, institutionA).matters.byId(matter))?.status).toBe('ASSIGNED');
+      expect(await tenantRepositories(tx, institutionA).matters.states(matter)).toHaveLength(2);
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('start-denied')).toHaveLength(0);
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('start-forged')).toHaveLength(0);
     });
   });
 

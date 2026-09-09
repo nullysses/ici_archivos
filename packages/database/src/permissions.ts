@@ -8,6 +8,16 @@ export const capabilities = [
 ] as const;
 export type Capability = (typeof capabilities)[number];
 
+const knownCapabilities = new Set<string>(capabilities);
+
+/** Framework-independent authorization evidence resolved from ICI persistence. */
+export interface AuthorizationContext {
+  readonly userId: string;
+  readonly institutionId: string;
+  readonly capabilities: ReadonlySet<Capability>;
+  readonly authorizedUnitIds: ReadonlySet<string>;
+}
+
 export async function resolveEffectivePermissions(transaction: DatabaseTransaction, institutionId: string, userId: string, at: Date = new Date()): Promise<ReadonlySet<string>> {
   const rows = await transaction.selectFrom('user_role_assignments as ura')
     .innerJoin('role_permissions as rp', 'rp.role_id', 'ura.role_id')
@@ -23,4 +33,26 @@ export async function resolveEffectivePermissions(transaction: DatabaseTransacti
 
 export async function hasEffectivePermission(transaction: DatabaseTransaction, institutionId: string, userId: string, capability: Capability, at?: Date): Promise<boolean> {
   return (await resolveEffectivePermissions(transaction, institutionId, userId, at)).has(capability);
+}
+
+export async function resolveAuthorizedUnitIds(transaction: DatabaseTransaction, institutionId: string, userId: string, at: Date = new Date()): Promise<ReadonlySet<string>> {
+  const rows = await transaction.selectFrom('user_role_assignments')
+    .select('unit_id')
+    .where('institution_id', '=', institutionId)
+    .where('user_id', '=', userId)
+    .where('effective_from', '<=', at)
+    .where((eb) => eb.or([eb('effective_until', 'is', null), eb('effective_until', '>', at)]))
+    .where('unit_id', 'is not', null)
+    .execute();
+  return new Set(rows.flatMap((row) => row.unit_id === null ? [] : [row.unit_id]));
+}
+
+export async function resolveAuthorizationContext(transaction: DatabaseTransaction, institutionId: string, userId: string, at: Date = new Date()): Promise<AuthorizationContext> {
+  const [permissions, authorizedUnitIds] = await Promise.all([
+    resolveEffectivePermissions(transaction, institutionId, userId, at),
+    resolveAuthorizedUnitIds(transaction, institutionId, userId, at),
+  ]);
+  const resolvedCapabilities = new Set<Capability>();
+  for (const permission of permissions) if (knownCapabilities.has(permission)) resolvedCapabilities.add(permission as Capability);
+  return { userId, institutionId, capabilities: resolvedCapabilities, authorizedUnitIds };
 }

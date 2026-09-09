@@ -15,6 +15,7 @@ import {
   invalidTransition,
   requireNonBlank,
 } from './types.js';
+import { canPerform, type AuthorizationContext } from './authorization.js';
 
 export interface RegisterMatterInput {
   readonly id: MatterId;
@@ -79,14 +80,18 @@ export function reassignMatter(matter: Matter, input: ReassignMatterInput): Doma
 
 export interface StartMatterInput {
   readonly actorUserId: UserId;
-  readonly authorizedUnitIds: readonly OrganizationalUnitId[];
+  readonly authorizationContext: AuthorizationContext;
   readonly startedAt: Date;
 }
 
 export function startMatter(matter: Matter, input: StartMatterInput): DomainMutation<Matter> {
   if (matter.state !== 'ASSIGNED') invalidTransition('matter', matter.state, 'startMatter');
   const currentAssignment = matter.currentAssignment;
-  if (currentAssignment === undefined || (currentAssignment.userId !== input.actorUserId && !input.authorizedUnitIds.includes(currentAssignment.unitId))) {
+  const authorization = input.authorizationContext;
+  if (authorization.userId !== input.actorUserId || authorization.institutionId !== matter.institutionId) {
+    throw new DomainInvariantError('NOT_AUTHORIZED', 'Authorization context does not match the matter actor and institution');
+  }
+  if (currentAssignment === undefined || (currentAssignment.userId !== input.actorUserId && !canPerform(authorization, 'matter.start', currentAssignment.unitId))) {
     throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or an authorized member of the assigned unit');
   }
   const next = { ...matter, state: 'IN_PROGRESS' as const };

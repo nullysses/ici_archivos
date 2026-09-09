@@ -18,7 +18,7 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: 'pnpm dev:web -- --host 127.0.0.1',
+      command: 'pnpm --filter @ici/web dev --host 127.0.0.1',
       port: 5173,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
@@ -26,4 +26,3 @@ export default defineConfig({
   ],
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 });
-

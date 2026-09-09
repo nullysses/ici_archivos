@@ -46,6 +46,7 @@ import {
   voidMatter,
   registerMatter,
   type Expediente,
+  type AuthorizationContext,
   type Matter,
   type ExpedienteTypeVersion,
 } from './index.js';
@@ -58,6 +59,10 @@ const matter = matterId('00000000-0000-4000-8000-000000000005');
 const now = new Date('2026-09-07T12:00:00.000Z');
 const json = { subject: 'Test' };
 
+function authorization(actor = user): AuthorizationContext {
+  return { userId: actor, institutionId: institution, institutionCapabilities: new Set(), unitCapabilities: new Map() };
+}
+
 function registeredMatter(): Matter {
   return registerMatter({ id: matter, institutionId: institution, folio: 'OP-2026-000001', receivedAt: now, intake: json }).aggregate;
 }
@@ -67,7 +72,7 @@ function assignedMatter(): Matter {
 }
 
 function inProgressMatter(): Matter {
-  return startMatter(assignedMatter(), { actorUserId: user, authorizedUnitIds: [], startedAt: now }).aggregate;
+  return startMatter(assignedMatter(), { actorUserId: user, authorizationContext: authorization(), startedAt: now }).aggregate;
 }
 
 function resolvedMatter(): Matter {
@@ -96,9 +101,9 @@ describe('matter lifecycle commands', () => {
     const received = registeredMatter();
     const assigned = assignMatter(received, { assignmentId: entityId('00000000-0000-4000-8000-000000000009'), unitId: unit, userId: user, assignedAt: now }).aggregate;
     const reassigned = reassignMatter(assigned, { assignmentId: entityId('00000000-0000-4000-8000-000000000010'), unitId: unit, userId: user, reason: 'Changed owner', assignedAt: now }).aggregate;
-    const started = startMatter(reassigned, { actorUserId: user, authorizedUnitIds: [], startedAt: now }).aggregate;
+    const started = startMatter(reassigned, { actorUserId: user, authorizationContext: authorization(), startedAt: now }).aggregate;
     const reassignedWhileWorking = reassignMatter(started, { assignmentId: entityId('00000000-0000-4000-8000-000000000018'), unitId: unit, userId: user, reason: 'Changed owner again', assignedAt: now }).aggregate;
-    const restarted = startMatter(reassignedWhileWorking, { actorUserId: user, authorizedUnitIds: [], startedAt: now }).aggregate;
+    const restarted = startMatter(reassignedWhileWorking, { actorUserId: user, authorizationContext: authorization(), startedAt: now }).aggregate;
     const resolved = resolveMatter(restarted, { resolution: 'done' }, now).aggregate;
     const linked = linkMatterToExpediente(resolved, openExpediente(), now).aggregate;
     const reopened = reopenMatter(linked, 'Additional review', openExpediente(), now).aggregate;
@@ -116,9 +121,10 @@ describe('matter lifecycle commands', () => {
   });
 
   it('rejects invalid and unauthorized matter transitions', () => {
-    expect(() => startMatter(registeredMatter(), { actorUserId: user, authorizedUnitIds: [], startedAt: now })).toThrow(/not allowed/);
+    expect(() => startMatter(registeredMatter(), { actorUserId: user, authorizationContext: authorization(), startedAt: now })).toThrow(/not allowed/);
     expect(() => resolveMatter(assignedMatter(), { resolution: 'no' }, now)).toThrow(/not allowed/);
-    expect(() => startMatter(assignedMatter(), { actorUserId: userId('00000000-0000-4000-8000-000000000011'), authorizedUnitIds: [], startedAt: now })).toThrow(/authorized member/i);
+    const otherUser = userId('00000000-0000-4000-8000-000000000011');
+    expect(() => startMatter(assignedMatter(), { actorUserId: otherUser, authorizationContext: authorization(otherUser), startedAt: now })).toThrow(/authorized member/i);
     expect(() => voidMatter(inProgressMatter(), 'wrong state', now)).toThrow(/not allowed/);
     expect(() => closeMatter(resolvedMatter(), expediente, {}, now)).toThrow(/closure metadata/i);
     expect(() => reassignMatter(assignedMatter(), { assignmentId: entityId('00000000-0000-4000-8000-000000000030'), unitId: unit, userId: user, reason: ' ', assignedAt: now })).toThrow(/reason/i);

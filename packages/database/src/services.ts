@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'kysely';
-import type { ArchiveTransferState, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
-import { DomainInvariantError } from '@ici/domain';
+import type { ArchiveTransferState, AuthorizationContext, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
+import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantTransaction } from './index.js';
-import type { AuthorizationContext } from './permissions.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
   registerMatter: { from: [], to: 'RECEIVED' },
@@ -223,7 +222,7 @@ export async function persistMatterTransition(database: Database, input: StateTr
       const authorization = input.authorizationContext;
       if (authorization === undefined || authorization.institutionId !== input.institutionId || authorization.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'startMatter requires matching server-derived authorization context');
       const assignment = await transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id']).where('institution_id', '=', input.institutionId).where('matter_id', '=', input.aggregateId).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
-      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !authorization.authorizedUnitIds.has(assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or an authorized member of the assigned unit');
+      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !canPerform(authorization, 'matter.start', assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or authorized to start matters for the assigned unit');
     }
     if (input.command === 'resolveMatter') {
       const resolution = objectEventValue(input.eventData, 'resolutionMetadata');

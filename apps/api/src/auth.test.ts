@@ -19,20 +19,22 @@ describe('authenticateAccessToken', () => {
     databaseMocks.withTenantTransaction.mockImplementation(async (_database: unknown, _institutionId: string, callback: TransactionCallback) => callback({}));
   });
 
-  it('returns units resolved by ICI authorization persistence, not token claims', async () => {
+  it('returns scoped authorization resolved by ICI persistence, not token claims', async () => {
     const issuer = 'https://issuer.example.test';
     const subject = 'subject-123';
     const userId = '90000000-0000-4000-8000-000000000201';
     const institutionId = '90000000-0000-4000-8000-000000000202';
-    const authorizedUnitIds = new Set(['90000000-0000-4000-8000-000000000203']);
+    const unitId = '90000000-0000-4000-8000-000000000203';
+    const authorization = { userId, institutionId, institutionCapabilities: new Set(['records.read']), unitCapabilities: new Map([[unitId, new Set(['matter.start'])]]) };
     databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId, userId, status: 'ACTIVE' });
-    databaseMocks.resolveAuthorizationContext.mockResolvedValue({ userId, institutionId, capabilities: new Set(['matter.start']), authorizedUnitIds });
-    const verifier: AccessTokenVerifier = { verify: vi.fn().mockResolvedValue({ issuer, subject, email: 'changed@example.test' }) };
+    databaseMocks.resolveAuthorizationContext.mockResolvedValue(authorization);
+    const verifier: AccessTokenVerifier = { verify: vi.fn().mockResolvedValue({ issuer, subject, email: 'changed@example.test', permissions: ['identity.manage'], authorizedUnitIds: ['forged-unit'] }) };
 
     const principal = await authenticateAccessToken({} as Database, verifier, 'access-token');
 
-    expect(principal).toMatchObject({ userId, institutionId, issuer, subject, authorizedUnitIds });
-    expect(principal.permissions.has('matter.start')).toBe(true);
+    expect(principal).toMatchObject({ userId, institutionId, issuer, subject, authorization });
+    expect(principal).not.toHaveProperty('permissions');
+    expect(principal).not.toHaveProperty('authorizedUnitIds');
     expect(databaseMocks.resolveExternalIdentity).toHaveBeenCalledWith(expect.anything(), issuer, subject);
     expect(databaseMocks.resolveAuthorizationContext).toHaveBeenCalledWith(expect.anything(), institutionId, userId);
   });

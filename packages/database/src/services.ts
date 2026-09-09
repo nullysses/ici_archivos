@@ -374,12 +374,12 @@ export async function createDocumentVersionMetadataAtomically(database: Database
   });
 }
 
-export async function publishExpedienteTypeVersionAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly actorUserId?: string; readonly correlationId: string; readonly publishedAt: Date }, validateSchemaDefinition?: (schema: JsonObject) => void): Promise<void> {
+export async function publishExpedienteTypeVersionAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly actorUserId?: string; readonly correlationId: string; readonly publishedAt: Date }, validateSchemaDefinition: (schema: JsonObject) => void): Promise<void> {
   await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente_type_version.published', aggregateType: 'expediente_type_version', aggregateId: input.versionId, correlationId: input.correlationId, afterData: { status: 'PUBLISHED', publishedAt: input.publishedAt.toISOString() } }, async (transaction) => {
     const draft = await transaction.selectFrom('expediente_type_versions').select(['status', 'schema_json']).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();
     if (draft === undefined) throw new Error('Expediente type version not found');
     if (draft.status !== 'DRAFT') throw new DomainInvariantError('VERSION_NOT_DRAFT', 'Only a draft version may be published');
-    if (validateSchemaDefinition !== undefined) validateSchemaDefinition(draft.schema_json);
+    validateSchemaDefinition(draft.schema_json);
     await transaction.updateTable('expediente_type_versions').set({ status: 'PUBLISHED', published_at: input.publishedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).execute();
   });
 }

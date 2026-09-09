@@ -203,7 +203,7 @@ export interface AccessClassificationsTable {
 export interface DocumentsTable {
   id: Generated<string>;
   institution_id: string;
-  expediente_id: string;
+  expediente_id: Nullable<string>;
   matter_id: Nullable<string>;
   document_type: string;
   title: string;

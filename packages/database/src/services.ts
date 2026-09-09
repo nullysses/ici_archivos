@@ -371,10 +371,16 @@ export interface DocumentVersionMetadataInput {
 export async function createDocumentVersionMetadataAtomically(database: Database, input: DocumentVersionMetadataInput): Promise<number> {
   if (input.malwareScanStatus !== 'PENDING_SCAN') throw new DomainInvariantError('INVALID_INITIAL_SCAN_STATUS', 'A new document version must begin pending malware scan');
   return withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.createdBy, eventType: 'document.version_created', aggregateType: 'document', aggregateId: input.documentId, correlationId: input.correlationId, eventData: { versionId: input.versionId } }, async (transaction) => {
-    const document = await transaction.selectFrom('documents').select(['expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).forUpdate().executeTakeFirst();
+    const document = await transaction.selectFrom('documents').select(['expediente_id', 'matter_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).forUpdate().executeTakeFirst();
     if (document === undefined) throw new Error('Document not found');
-    const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', document.expediente_id).executeTakeFirst();
-    if (expediente?.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Routine document version creation requires an open expediente');
+    if ((document.expediente_id === null) === (document.matter_id === null)) throw new DomainInvariantError('INVALID_DOCUMENT_PARENT', 'A logical document must have exactly one parent');
+    if (document.expediente_id !== null) {
+      const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', document.expediente_id).executeTakeFirst();
+      if (expediente?.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Routine document version creation requires an open expediente');
+    } else {
+      const matter = await transaction.selectFrom('matters').select('status').where('institution_id', '=', input.institutionId).where('id', '=', document.matter_id as string).executeTakeFirst();
+      if (matter === undefined || matter.status === 'CLOSED' || matter.status === 'VOIDED') throw new DomainInvariantError('MATTER_NOT_OPEN', 'Routine document version creation requires a non-terminal matter');
+    }
     const latest = await transaction.selectFrom('document_versions').select(({ fn }) => fn.max('version_number').as('latest_version')).where('institution_id', '=', input.institutionId).where('document_id', '=', input.documentId).executeTakeFirst();
     const versionNumber = Number(latest?.latest_version ?? 0) + 1;
     if (versionNumber > 1 && (input.replacementReason === undefined || input.replacementReason.trim().length === 0)) throw new DomainInvariantError('REPLACEMENT_REASON_REQUIRED', 'A replacement document version requires a reason');

@@ -37,6 +37,7 @@ describe('PostgreSQL foundation', () => {
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
     database = createDatabase(container.getConnectionUri());
+    await sql`CREATE ROLE ici_app NOLOGIN NOSUPERUSER NOBYPASSRLS`.execute(database);
     await applyFoundationMigrations(database);
     await database.insertInto('institutions').values([
       { id: institutionA, code: 'A', name: 'Institution A', status: 'ACTIVE' },

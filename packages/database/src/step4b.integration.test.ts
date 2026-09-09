@@ -236,4 +236,116 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       await expect(tx.updateTable('expediente_type_versions').set({ schema_json: {} }).where('id', '=', valid).execute()).rejects.toThrow(/immutable/i);
     });
   });
+
+  it('creates and promotes versions for non-terminal matter-owned documents atomically', async () => {
+    const matter = '90000000-0000-4000-8000-000000000060';
+    const document = '90000000-0000-4000-8000-000000000061';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000601', folio_year: 2026, sequence_number: 601, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'matter document' } }).execute();
+      await tx.insertInto('documents').values({ id: document, institution_id: institutionA, matter_id: matter, document_type: 'record', title: 'Matter document' }).execute();
+    });
+    await createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: '90000000-0000-4000-8000-000000000062', originalFilename: 'one.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'c'.repeat(64), storageKey: 'matter-one', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'matter-v1' });
+    await withTenantTransaction(owner(), institutionA, async (tx) => { await sql`ALTER TABLE matters DISABLE TRIGGER USER`.execute(tx); await tx.updateTable('matters').set({ status: 'IN_PROGRESS' }).where('id', '=', matter).execute(); await sql`ALTER TABLE matters ENABLE TRIGGER USER`.execute(tx); });
+    await createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: '90000000-0000-4000-8000-000000000063', originalFilename: 'two.pdf', detectedMimeType: 'application/pdf', sizeBytes: 2, sha256: 'd'.repeat(64), storageKey: 'matter-two', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'replacement', correlationId: 'matter-v2' });
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      expect(await tenantRepositories(tx, institutionA).documents.versions(document)).toMatchObject([{ version_number: 2 }, { version_number: 1 }]);
+      expect((await tenantRepositories(tx, institutionA).documents.byId(document))?.current_version_id).toBe('90000000-0000-4000-8000-000000000063');
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('matter-v1')).toHaveLength(1);
+    });
+  });
+
+  it('rejects CLOSED and VOIDED matter and closed expediente document versions without audit', async () => {
+    const voidedMatter = '90000000-0000-4000-8000-000000000064';
+    const voidedMatterDocument = '90000000-0000-4000-8000-000000000065';
+    const closedExpedienteDocument = '90000000-0000-4000-8000-000000000066';
+    const closedMatter = '90000000-0000-4000-8000-000000000073';
+    const closedMatterDocument = '90000000-0000-4000-8000-000000000074';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('matters').values([
+        { id: voidedMatter, institution_id: institutionA, folio: 'OP-2026-000602', folio_year: 2026, sequence_number: 602, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'voided terminal' } },
+        { id: closedMatter, institution_id: institutionA, folio: 'OP-2026-000604', folio_year: 2026, sequence_number: 604, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'closed terminal' } },
+      ]).execute();
+      await sql`ALTER TABLE matters DISABLE TRIGGER USER`.execute(tx);
+      await tx.updateTable('matters').set({ status: 'VOIDED' }).where('id', '=', voidedMatter).execute();
+      await tx.updateTable('matters').set({ status: 'CLOSED' }).where('id', '=', closedMatter).execute();
+      await sql`ALTER TABLE matters ENABLE TRIGGER USER`.execute(tx);
+      await tx.insertInto('documents').values([
+        { id: voidedMatterDocument, institution_id: institutionA, matter_id: voidedMatter, document_type: 'record', title: 'voided terminal' },
+        { id: closedMatterDocument, institution_id: institutionA, matter_id: closedMatter, document_type: 'record', title: 'closed terminal' },
+        { id: closedExpedienteDocument, institution_id: institutionA, expediente_id: expedienteA, document_type: 'record', title: 'closed exp' },
+      ]).execute();
+    });
+    await createDocumentVersionMetadataAtomically(app(), {
+      institutionId: institutionA,
+      documentId: closedExpedienteDocument,
+      versionId: '90000000-0000-4000-8000-000000000080',
+      originalFilename: 'open.pdf',
+      detectedMimeType: 'application/pdf',
+      sizeBytes: 1,
+      sha256: '2'.repeat(64),
+      storageKey: 'open-expediente',
+      malwareScanStatus: 'PENDING_SCAN',
+      createdBy: developmentSeedIds.adminUser,
+      correlationId: 'open-expediente',
+    });
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await sql`ALTER TABLE expedientes DISABLE TRIGGER USER`.execute(tx); await tx.updateTable('expedientes').set({ status: 'CLOSED' }).where('id', '=', expedienteA).execute(); await sql`ALTER TABLE expedientes ENABLE TRIGGER USER`.execute(tx);
+    });
+    const input = (documentId: string, versionId: string, correlationId: string) => ({ institutionId: institutionA, documentId, versionId, originalFilename: 'blocked.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'e'.repeat(64), storageKey: versionId, malwareScanStatus: 'PENDING_SCAN' as const, createdBy: developmentSeedIds.adminUser, replacementReason: 'blocked replacement', correlationId });
+    await expect(createDocumentVersionMetadataAtomically(app(), input(voidedMatterDocument, '90000000-0000-4000-8000-000000000067', 'voided-matter'))).rejects.toThrow();
+    await expect(createDocumentVersionMetadataAtomically(app(), input(closedExpedienteDocument, '90000000-0000-4000-8000-000000000068', 'closed-exp'))).rejects.toThrow();
+    await expect(createDocumentVersionMetadataAtomically(app(), input(closedMatterDocument, '90000000-0000-4000-8000-000000000075', 'closed-matter'))).rejects.toThrow();
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      for (const [documentId, correlationId] of [[voidedMatterDocument, 'voided-matter'], [closedMatterDocument, 'closed-matter']] as const) {
+        expect(await tenantRepositories(tx, institutionA).documents.versions(documentId)).toHaveLength(0);
+        expect(await tenantRepositories(tx, institutionA).audit.forCorrelation(correlationId)).toHaveLength(0);
+      }
+      expect(await tenantRepositories(tx, institutionA).documents.versions(closedExpedienteDocument)).toMatchObject([{ version_number: 1 }]);
+      expect((await tenantRepositories(tx, institutionA).documents.byId(closedExpedienteDocument))?.current_version_id).toBe('90000000-0000-4000-8000-000000000080');
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('open-expediente')).toHaveLength(1);
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('closed-exp')).toHaveLength(0);
+    });
+  });
+
+  it('fails closed for malformed logical documents with invalid parent ownership', async () => {
+    const noParent = '90000000-0000-4000-8000-000000000076';
+    const bothParents = '90000000-0000-4000-8000-000000000078';
+    await sql`ALTER TABLE documents DROP CONSTRAINT documents_exactly_one_parent_check`.execute(owner());
+    try {
+      await withTenantTransaction(owner(), institutionA, async (tx) => {
+        await tx.insertInto('documents').values([
+          { id: noParent, institution_id: institutionA, document_type: 'record', title: 'No-parent fixture' },
+          { id: bothParents, institution_id: institutionA, expediente_id: expedienteA, matter_id: matterA, document_type: 'record', title: 'Both-parents fixture' },
+        ]).execute();
+      });
+      const input = (documentId: string, versionId: string, correlationId: string) => ({ institutionId: institutionA, documentId, versionId, originalFilename: 'invalid.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: '1'.repeat(64), storageKey: correlationId, malwareScanStatus: 'PENDING_SCAN' as const, createdBy: developmentSeedIds.adminUser, correlationId });
+      await expect(createDocumentVersionMetadataAtomically(app(), input(noParent, '90000000-0000-4000-8000-000000000077', 'invalid-no-parent'))).rejects.toThrow(/exactly one parent/i);
+      await expect(createDocumentVersionMetadataAtomically(app(), input(bothParents, '90000000-0000-4000-8000-000000000079', 'invalid-both-parents'))).rejects.toThrow(/exactly one parent/i);
+      await withTenantTransaction(app(), institutionA, async (tx) => {
+        for (const [documentId, correlationId] of [[noParent, 'invalid-no-parent'], [bothParents, 'invalid-both-parents']] as const) {
+          expect(await tenantRepositories(tx, institutionA).documents.versions(documentId)).toHaveLength(0);
+          expect(await tenantRepositories(tx, institutionA).audit.forCorrelation(correlationId)).toHaveLength(0);
+        }
+      });
+    } finally {
+      await withTenantTransaction(owner(), institutionA, async (tx) => { await tx.deleteFrom('documents').where('id', 'in', [noParent, bothParents]).execute(); });
+      await sql`ALTER TABLE documents ADD CONSTRAINT documents_exactly_one_parent_check CHECK ((expediente_id IS NOT NULL AND matter_id IS NULL) OR (expediente_id IS NULL AND matter_id IS NOT NULL))`.execute(owner());
+    }
+  });
+
+  it('serializes concurrent versions for one matter-owned logical document', async () => {
+    const matter = '90000000-0000-4000-8000-000000000069';
+    const document = '90000000-0000-4000-8000-000000000070';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000603', folio_year: 2026, sequence_number: 603, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'concurrent' } }).execute();
+      await tx.insertInto('documents').values({ id: document, institution_id: institutionA, matter_id: matter, document_type: 'record', title: 'Concurrent' }).execute();
+    });
+    const version = (id: string, hash: string, correlationId: string) => createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: id, originalFilename: `${id}.pdf`, detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: hash, storageKey: id, malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'concurrent request', correlationId });
+    await Promise.all([version('90000000-0000-4000-8000-000000000071', 'f'.repeat(64), 'concurrent-1'), version('90000000-0000-4000-8000-000000000072', '0'.repeat(64), 'concurrent-2')]);
+    await withTenantTransaction(app(), institutionA, async (tx) => {
+      const versions = await tenantRepositories(tx, institutionA).documents.versions(document);
+      expect(versions.map((row) => row.version_number).sort()).toEqual([1, 2]);
+      expect((await tenantRepositories(tx, institutionA).documents.byId(document))?.current_version_id).toBe(versions[0]?.id);
+    });
+  });
 });

@@ -13,6 +13,7 @@ const unitA = '11000000-0000-4000-8000-000000000004';
 const unitB = '11000000-0000-4000-8000-000000000005';
 const classificationA = '11000000-0000-4000-8000-000000000006';
 const unitA2 = '11000000-0000-4000-8000-000000000009';
+const unitA3 = '11000000-0000-4000-8000-00000000000a';
 const now = '2026-09-11T12:00:00.000Z';
 
 describe('matter HTTP API with real PostgreSQL persistence', () => {
@@ -33,6 +34,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     await database.insertInto('organizational_units').values([
       { id: unitA, institution_id: institutionA, code: 'UNIT-A', name: 'Unit A', status: 'ACTIVE' },
       { id: unitA2, institution_id: institutionA, code: 'UNIT-A2', name: 'Unit A2', status: 'ACTIVE' },
+      { id: unitA3, institution_id: institutionA, code: 'UNIT-A3', name: 'Unit A3', status: 'ACTIVE' },
       { id: unitB, institution_id: institutionB, code: 'UNIT-B', name: 'Unit B', status: 'ACTIVE' },
     ]).execute();
     await database.insertInto('users').values({ id: userA, institution_id: institutionA, display_name: 'Matter operator', status: 'ACTIVE' }).execute();
@@ -90,7 +92,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload });
     const body = created.json<{ id: string }>();
     expect((await api().inject({ method: 'GET', url: `/matters/${body.id}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(200);
-    await assignMatterAtomically(db(), { institutionId: institutionA, matterId: body.id, assignmentId: '11000000-0000-4000-8000-000000000010', unitId: unitA2, actorUserId: userA, correlationId: 'effective-unit-test', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: new Date(now) });
+    await assignMatterAtomically(db(), { institutionId: institutionA, matterId: body.id, assignmentId: '11000000-0000-4000-8000-000000000010', unitId: unitA2, actorUserId: userA, correlationId: 'effective-unit-test', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: new Date(now), authorizationContext: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.assign'] as const), unitCapabilities: new Map() } });
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitB, new Set(['records.read'])]]) } };
     expect((await api().inject({ method: 'GET', url: `/matters/${body.id}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(403);
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA2, new Set(['records.read'])]]) } };
@@ -163,19 +165,33 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect(forbidden.statusCode).toBe(403);
   });
 
-  it('serializes concurrent reassignments from ASSIGNED', async () => {
-    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.assign'])], [unitA2, new Set(['matter.assign'])]]) } };
+  it('serializes concurrent reassignments and resolves latest unit by lock order', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.assign'])], [unitA2, new Set(['matter.assign'])], [unitA3, new Set(['matter.assign'])]]) } };
     const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2029-09-11T12:00:00.000Z' } });
     expect(created.statusCode).toBe(201);
     const matterId = created.json<{ id: string }>().id;
     expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA } })).statusCode).toBe(200);
-    const responses = await Promise.all([
-      api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA2, reason: 'Concurrent move 1' } }),
-      api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA2, reason: 'Concurrent move 2' } }),
-    ]);
+    let releaseLock!: () => void;
+    let lockReady!: () => void;
+    const lockAcquired = new Promise<void>((resolve) => { lockReady = resolve; });
+    const lockRelease = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const holder = db().transaction().execute(async (transaction) => {
+      await transaction.selectFrom('matters').select('id').where('id', '=', matterId).forUpdate().executeTakeFirstOrThrow();
+      lockReady();
+      await lockRelease;
+    });
+    await lockAcquired;
+    const first = api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA2, reason: 'Concurrent move 1' } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA3, reason: 'Concurrent move 2' } });
+    releaseLock();
+    const responses = await Promise.all([first, second]);
+    await holder;
     expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 200]);
     const assignments = await db().selectFrom('matter_assignments').selectAll().where('matter_id', '=', matterId).orderBy('assigned_at').orderBy('id').execute();
     expect(assignments).toHaveLength(3);
-    expect(assignments.slice(1).every((assignment) => assignment.unit_id === unitA2)).toBe(true);
+    expect(assignments[1]?.unit_id).toBe(unitA2);
+    expect(assignments[2]?.unit_id).toBe(unitA3);
+    expect(assignments[2]?.assigned_at.getTime()).toBeGreaterThan(assignments[1]?.assigned_at.getTime() ?? 0);
   });
 });

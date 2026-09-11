@@ -31,6 +31,10 @@ const unitA = '00000000-0000-4000-8000-000000000020';
 const unitB = '00000000-0000-4000-8000-000000000021';
 const now = new Date('2026-09-07T12:00:00.000Z');
 
+function assignmentAuthorization(userId: string, institutionId: string) {
+  return { userId, institutionId, institutionCapabilities: new Set(['matter.assign'] as const), unitCapabilities: new Map() };
+}
+
 describe('PostgreSQL foundation', () => {
   let container: StartedPostgreSqlContainer | undefined;
   let database: Database | undefined;
@@ -180,6 +184,7 @@ describe('PostgreSQL foundation', () => {
       command: 'assignMatter',
       fromStatus: 'RECEIVED',
       assignedAt: now,
+      authorizationContext: assignmentAuthorization('00000000-0000-4000-8000-999999999999', institutionA),
     })).rejects.toThrow();
     expect((await db().selectFrom('matters').select('status').where('id', '=', matterA).executeTakeFirstOrThrow()).status).toBe('RECEIVED');
     expect(await db().selectFrom('matter_assignments').select('id').where('id', '=', assignmentId).execute()).toHaveLength(0);

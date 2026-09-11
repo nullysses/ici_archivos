@@ -38,6 +38,10 @@ const transferA = '90000000-0000-4000-8000-000000000011';
 const manifestA = '90000000-0000-4000-8000-000000000012';
 const fixedNow = new Date('2026-09-09T12:00:00.000Z');
 
+function assignmentAuthorization(userId: string, institutionId: string) {
+  return { userId, institutionId, institutionCapabilities: new Set(['matter.assign'] as const), unitCapabilities: new Map() };
+}
+
 describe('Step 4b PostgreSQL persistence foundation', () => {
   let container: StartedPostgreSqlContainer | undefined;
   let ownerDatabase: Database | undefined;
@@ -258,8 +262,8 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     });
     await registerMatterAtomically(app(), { id: directMatter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'direct' }, correlationId: 'fixture-direct', actorUserId: actor, year: 2026 });
     await registerMatterAtomically(app(), { id: unitMatter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'unit' }, correlationId: 'fixture-unit', actorUserId: actor, year: 2026 });
-    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: directMatter, assignmentId: '90000000-0000-4000-8000-000000000126', unitId: directOnlyUnit, userId: actor, actorUserId: actor, correlationId: 'fixture-direct-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
-    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: unitMatter, assignmentId: '90000000-0000-4000-8000-000000000127', unitId: authorizedUnit, userId: otherUser, actorUserId: actor, correlationId: 'fixture-unit-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: directMatter, assignmentId: '90000000-0000-4000-8000-000000000126', unitId: directOnlyUnit, userId: actor, actorUserId: actor, correlationId: 'fixture-direct-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow, authorizationContext: assignmentAuthorization(actor, institutionA) });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: unitMatter, assignmentId: '90000000-0000-4000-8000-000000000127', unitId: authorizedUnit, userId: otherUser, actorUserId: actor, correlationId: 'fixture-unit-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow, authorizationContext: assignmentAuthorization(actor, institutionA) });
     await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: directMatter, actorUserId: actor, authorizationContext, correlationId: 'start-direct', command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' });
     await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: unitMatter, actorUserId: actor, authorizationContext, correlationId: 'start-unit', command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' });
     await withTenantTransaction(app(), institutionA, async (tx) => {
@@ -298,7 +302,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       return context;
     });
     await registerMatterAtomically(app(), { id: matter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'denied' }, correlationId: 'fixture-denied', actorUserId: actor, year: 2026 });
-    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: matter, assignmentId: '90000000-0000-4000-8000-000000000135', unitId: assignedUnit, userId: assignee, actorUserId: actor, correlationId: 'fixture-denied-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: matter, assignmentId: '90000000-0000-4000-8000-000000000135', unitId: assignedUnit, userId: assignee, actorUserId: actor, correlationId: 'fixture-denied-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow, authorizationContext: assignmentAuthorization(actor, institutionA) });
     const baseInput = { institutionId: institutionA, aggregateId: matter, actorUserId: actor, authorizationContext, command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' } as const;
     await expect(persistMatterTransition(app(), { ...baseInput, correlationId: 'start-denied' })).rejects.toThrow(/not the current assignee/i);
     await expect(persistMatterTransition(app(), { ...baseInput, correlationId: 'start-forged', eventData: { authorizedUnitIds: [assignedUnit] } })).rejects.toThrow(/must not be supplied in event data/i);
@@ -326,7 +330,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       return resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
     });
     await registerMatterAtomically(app(), { id: matter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'institution-wide start' }, correlationId: 'fixture-institution-start', actorUserId: actor, year: 2026 });
-    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: matter, assignmentId: '90000000-0000-4000-8000-000000000146', unitId: assignedUnit, userId: assignee, actorUserId: actor, correlationId: 'fixture-institution-start-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow });
+    await assignMatterAtomically(app(), { institutionId: institutionA, matterId: matter, assignmentId: '90000000-0000-4000-8000-000000000146', unitId: assignedUnit, userId: assignee, actorUserId: actor, correlationId: 'fixture-institution-start-assignment', command: 'assignMatter', fromStatus: 'RECEIVED', assignedAt: fixedNow, authorizationContext: assignmentAuthorization(actor, institutionA) });
     await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: matter, actorUserId: actor, authorizationContext, correlationId: 'start-institution-wide', command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS' });
     await withTenantTransaction(app(), institutionA, async (tx) => {
       expect((await tenantRepositories(tx, institutionA).matters.byId(matter))?.status).toBe('IN_PROGRESS');

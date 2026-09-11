@@ -119,7 +119,6 @@ export function createMatterApplicationService(database: Database): MatterApplic
           fromStatus: current.status as 'RECEIVED' | 'ASSIGNED' | 'IN_PROGRESS',
           ...(input.request.reason === undefined ? {} : { reason: input.request.reason }),
           authorizationContext: input.authorization,
-          assignedAt: new Date(),
         });
       } catch (error) {
         const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;

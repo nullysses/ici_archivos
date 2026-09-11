@@ -222,9 +222,10 @@ export interface MatterAssignmentPersistenceInput {
   readonly command: 'assignMatter' | 'reassignMatter';
   readonly fromStatus: 'RECEIVED' | 'ASSIGNED' | 'IN_PROGRESS';
   readonly reason?: string;
-  readonly assignedAt: Date;
+  /** Legacy fixture hint; authoritative assignment time is generated after the lock. */
+  readonly assignedAt?: Date;
   /** Trusted server-derived authorization. Required for application commands. */
-  readonly authorizationContext?: AuthorizationContext;
+  readonly authorizationContext: AuthorizationContext;
 }
 
 export async function assignMatterAtomically(database: Database, input: MatterAssignmentPersistenceInput): Promise<void> {
@@ -235,21 +236,22 @@ export async function assignMatterAtomically(database: Database, input: MatterAs
     const current = await transaction.selectFrom('matters').select(['status', 'destination_unit_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forUpdate().executeTakeFirst();
     if (current === undefined) throw new Error('Matter not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Matter is ${current.status}, expected ${input.fromStatus}`);
-    if (input.authorizationContext !== undefined) {
-      const authorization = input.authorizationContext;
-      if (authorization.institutionId !== String(input.institutionId) || authorization.userId !== input.actorUserId) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment authorization context does not match the actor');
-      const sourceUnitId = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, current.destination_unit_id);
-      if (!canPerform(authorization, 'matter.assign', sourceUnitId ?? undefined) || (sourceUnitId !== input.unitId && !canPerform(authorization, 'matter.assign', input.unitId))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot assign for the effective matter units');
-    }
+    const authorization = input.authorizationContext;
+    if (authorization.institutionId !== String(input.institutionId) || authorization.userId !== input.actorUserId) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment authorization context does not match the actor');
+    const sourceUnitId = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, current.destination_unit_id);
+    if (!canPerform(authorization, 'matter.assign', sourceUnitId ?? undefined) || (sourceUnitId !== input.unitId && !canPerform(authorization, 'matter.assign', input.unitId))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot assign for the effective matter units');
+    const timestampResult = await sql<{ assigned_at: Date }>`select clock_timestamp() as assigned_at`.execute(transaction);
+    const assignedAt = timestampResult.rows[0]?.assigned_at;
+    if (assignedAt === undefined) throw new Error('Assignment timestamp was not generated');
     const unit = await transaction.selectFrom('organizational_units').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.unitId).where('status', '=', 'ACTIVE').executeTakeFirst();
     if (unit === undefined) throw new DomainInvariantError('TARGET_UNIT_NOT_FOUND', 'Assignment target unit was not found');
     if (input.userId !== undefined) {
       const user = await transaction.selectFrom('users').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.userId).where('status', '=', 'ACTIVE').executeTakeFirst();
       if (user === undefined) throw new DomainInvariantError('TARGET_USER_NOT_FOUND', 'Assignment target user was not found');
     }
-    await transaction.insertInto('matter_assignments').values({ id: input.assignmentId, institution_id: input.institutionId, matter_id: input.matterId, unit_id: input.unitId, ...(input.userId === undefined ? {} : { user_id: input.userId }), ...(input.reason === undefined ? {} : { reason: input.reason }), assigned_at: input.assignedAt }).execute();
+    await transaction.insertInto('matter_assignments').values({ id: input.assignmentId, institution_id: input.institutionId, matter_id: input.matterId, unit_id: input.unitId, ...(input.userId === undefined ? {} : { user_id: input.userId }), ...(input.reason === undefined ? {} : { reason: input.reason }), assigned_at: assignedAt }).execute();
     await transaction.updateTable('matters').set({ status: toStatus, updated_at: new Date() }).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).execute();
-    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.matterId, from_status: input.fromStatus, to_status: toStatus, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(input.reason === undefined ? {} : { reason: input.reason }), event_data: { assignmentId: input.assignmentId, unitId: input.unitId, ...(input.userId === undefined ? {} : { userId: input.userId }) }, occurred_at: input.assignedAt }).execute();
+    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.matterId, from_status: input.fromStatus, to_status: toStatus, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(input.reason === undefined ? {} : { reason: input.reason }), event_data: { assignmentId: input.assignmentId, unitId: input.unitId, ...(input.userId === undefined ? {} : { userId: input.userId }) }, occurred_at: assignedAt }).execute();
   });
 }
 

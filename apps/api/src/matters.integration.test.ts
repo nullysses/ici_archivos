@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { applyFoundationMigrations, assignMatterAtomically, createDatabase, registerMatterAtomically, type Database } from '@ici/database';
+import { addMatterNoteAtomically, applyFoundationMigrations, assignMatterAtomically, createDatabase, registerMatterAtomically, type Database } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createMatterApplicationService } from './matters.js';
@@ -9,6 +9,7 @@ import { createMatterApplicationService } from './matters.js';
 const institutionA = '11000000-0000-4000-8000-000000000001';
 const institutionB = '11000000-0000-4000-8000-000000000002';
 const userA = '11000000-0000-4000-8000-000000000003';
+const userB = '11000000-0000-4000-8000-00000000000b';
 const unitA = '11000000-0000-4000-8000-000000000004';
 const unitB = '11000000-0000-4000-8000-000000000005';
 const classificationA = '11000000-0000-4000-8000-000000000006';
@@ -37,7 +38,10 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
       { id: unitA3, institution_id: institutionA, code: 'UNIT-A3', name: 'Unit A3', status: 'ACTIVE' },
       { id: unitB, institution_id: institutionB, code: 'UNIT-B', name: 'Unit B', status: 'ACTIVE' },
     ]).execute();
-    await database.insertInto('users').values({ id: userA, institution_id: institutionA, display_name: 'Matter operator', status: 'ACTIVE' }).execute();
+    await database.insertInto('users').values([
+      { id: userA, institution_id: institutionA, display_name: 'Matter operator', status: 'ACTIVE' },
+      { id: userB, institution_id: institutionB, display_name: 'Other institution operator', status: 'ACTIVE' },
+    ]).execute();
     await database.insertInto('access_classifications').values({ id: classificationA, institution_id: institutionA, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
     currentPrincipal = {
       userId: userA,
@@ -204,6 +208,8 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
 
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map() } };
     expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/start`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    const directAssigneeResolve = await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'direct-assignee-is-not-enough' } } });
+    expect(directAssigneeResolve.statusCode).toBe(403);
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitB, new Set(['matter.resolve'])]]) } };
     expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'wrong-unit' } } })).statusCode).toBe(403);
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['records.read', 'matter.start', 'matter.resolve'])]]) } };
@@ -239,5 +245,91 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     const unassignedId = unassigned.json<{ id: string }>().id;
     const invalidStart = await api().inject({ method: 'POST', url: `/matters/${unassignedId}/start`, headers: { authorization: 'Bearer test' }, payload: {} });
     expect(invalidStart.statusCode).toBe(400);
+  });
+
+  it('uses the latest assignment unit for transition authorization', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'matter.assign']), unitCapabilities: new Map() } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2033-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA } })).statusCode).toBe(200);
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA2, reason: 'Move to legal unit' } })).statusCode).toBe(200);
+
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA2, new Set(['matter.start'])]]) } };
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/start`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['matter.resolve'])]]) } };
+    const wrongUnit = await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'wrong-unit' } } });
+    expect(wrongUnit.statusCode).toBe(403);
+    expect((await api().inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(403);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA2, new Set(['matter.resolve', 'records.read'])]]) } };
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'resolved' } } })).statusCode).toBe(200);
+  });
+
+  it('uses the latest assignment unit for void authorization and keeps intake destination immutable', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'matter.assign']), unitCapabilities: new Map() } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2034-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA2 } })).statusCode).toBe(200);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['matter.void'])]]) } };
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Wrong source authority' } })).statusCode).toBe(403);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA2, new Set(['matter.void'])]]) } };
+    const voided = await api().inject({ method: 'POST', url: `/matters/${matterId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Created in error' } });
+    expect(voided.statusCode).toBe(200);
+    expect(voided.json<{ destinationUnitId: string; status: string }>()).toMatchObject({ destinationUnitId: unitA, status: 'VOIDED' });
+  });
+
+  it('fails closed for unsupported note visibility and keeps notes tenant-isolated', async () => {
+    const missingVisibilityId = '11000000-0000-4000-8000-000000000020';
+    await db().insertInto('matters').values({ id: missingVisibilityId, institution_id: institutionA, folio: 'OP-2035-000001', folio_year: 2035, sequence_number: 1, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'legacy', subject: 'legacy', description: 'legacy', priority: 'NORMAL', channel: 'EMAIL' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
+    const restrictedVisibilityId = '11000000-0000-4000-8000-000000000021';
+    await db().insertInto('matters').values({ id: restrictedVisibilityId, institution_id: institutionA, folio: 'OP-2035-000002', folio_year: 2035, sequence_number: 2, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'restricted', subject: 'restricted', description: 'restricted', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'RESTRICTED_GROUP' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['records.read']), unitCapabilities: new Map() } };
+    expect((await api().inject({ method: 'GET', url: `/matters/${missingVisibilityId}/notes`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(403);
+    expect((await api().inject({ method: 'GET', url: `/matters/${restrictedVisibilityId}/notes`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(403);
+
+    const tenantMatterId = '22000000-0000-4000-8000-000000000020';
+    await db().insertInto('matters').values({ id: tenantMatterId, institution_id: institutionB, folio: 'OP-2035-000001', folio_year: 2035, sequence_number: 1, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'other', subject: 'other', description: 'other', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'INSTITUTION' }, destination_unit_id: unitB, created_by: userB }).execute();
+    await db().insertInto('matter_notes').values({ id: '22000000-0000-4000-8000-000000000021', institution_id: institutionB, matter_id: tenantMatterId, author_user_id: userB, note_type: 'NOTE', content: 'Other tenant note' }).execute();
+    const crossTenant = await api().inject({ method: 'GET', url: `/matters/${tenantMatterId}/notes`, headers: { authorization: 'Bearer test' } });
+    expect(crossTenant.statusCode).toBe(404);
+  });
+
+  it('preserves note append-only and atomic validation behavior', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['records.read', 'matter.start'])]]) } };
+    const noteMatter = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2036-09-11T12:00:00.000Z' } });
+    const matterId = noteMatter.json<{ id: string }>().id;
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['records.read', 'matter.start'])]]) } };
+    const noteId = '11000000-0000-4000-8000-000000000022';
+    const auth = currentPrincipal.authorization;
+    const created = await addMatterNoteAtomically(db(), { id: noteId, institutionId: institutionA, matterId, authorUserId: userA, content: 'Persisted note', correlationId: 'note-atomic', authorizationContext: auth });
+    expect(created.id).toBe(noteId);
+    await expect(addMatterNoteAtomically(db(), { id: noteId, institutionId: institutionA, matterId, authorUserId: userA, content: 'Duplicate note', correlationId: 'note-duplicate', authorizationContext: auth })).rejects.toThrow();
+    expect(await db().selectFrom('matter_notes').select('id').where('matter_id', '=', matterId).execute()).toHaveLength(1);
+    expect(await db().selectFrom('audit_events').select('id').where('aggregate_id', '=', matterId).where('event_type', '=', 'matter.note_added').execute()).toHaveLength(1);
+    await expect(addMatterNoteAtomically(db(), { id: '11000000-0000-4000-8000-000000000023', institutionId: institutionA, matterId, authorUserId: userA, content: '   ', correlationId: 'note-invalid', authorizationContext: auth })).rejects.toThrow(/note/i);
+    await expect(addMatterNoteAtomically(db(), { id: '11000000-0000-4000-8000-000000000024', institutionId: institutionA, matterId, authorUserId: userA, content: 'x'.repeat(10_001), correlationId: 'note-oversize', authorizationContext: auth })).rejects.toThrow(/note/i);
+    await expect(db().updateTable('matter_notes').set({ content: 'tampered' }).where('id', '=', noteId).execute()).rejects.toThrow(/append-only/i);
+    await expect(db().deleteFrom('matter_notes').where('id', '=', noteId).execute()).rejects.toThrow(/append-only/i);
+  });
+
+  it('rejects invalid resolve and void state transitions without history changes', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.assign', 'matter.start', 'matter.resolve', 'matter.void'])]]) } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2037-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    const beforeEvents = await db().selectFrom('matter_state_events').select('id').where('matter_id', '=', matterId).execute();
+    const resolve = await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'invalid' } } });
+    expect(resolve.statusCode).toBe(400);
+    const voided = await api().inject({ method: 'POST', url: `/matters/${matterId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Valid void' } });
+    expect(voided.statusCode).toBe(200);
+    const invalidVoid = await api().inject({ method: 'POST', url: `/matters/${matterId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Second void' } });
+    expect(invalidVoid.statusCode).toBe(400);
+    expect(await db().selectFrom('matter_state_events').select('id').where('matter_id', '=', matterId).execute()).toHaveLength(beforeEvents.length + 1);
+
+    const assignedMatter = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2038-09-11T12:00:00.000Z' } });
+    const assignedId = assignedMatter.json<{ id: string }>().id;
+    expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA } })).statusCode).toBe(200);
+    expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'too-early' } } })).statusCode).toBe(400);
+    expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/start`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Too late to void' } })).statusCode).toBe(400);
+    expect((await db().selectFrom('matters').select('status').where('id', '=', assignedId).executeTakeFirstOrThrow()).status).toBe('IN_PROGRESS');
   });
 });

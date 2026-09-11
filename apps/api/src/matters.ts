@@ -31,7 +31,7 @@ import {
   findMatterByFolio,
   findMatterById,
   findMatterInbox,
-  findMatterNotes,
+  findMatterNotesAuthorized,
   persistMatterTransition,
   type JsonObject,
   registerMatterAtomically,
@@ -85,7 +85,11 @@ export interface MatterApplicationService {
     readonly eventData?: JsonObject;
     readonly reason?: string;
   }): Promise<MatterReadModel>;
-  listNotes(institutionId: string, matterId: string): Promise<readonly MatterNoteReadModel[]>;
+  listNotes(input: {
+    readonly institutionId: string;
+    readonly matterId: string;
+    readonly authorization: AuthenticatedPrincipal['authorization'];
+  }): Promise<readonly MatterNoteReadModel[]>;
   addNote(input: {
     readonly id: string;
     readonly institutionId: string;
@@ -208,7 +212,11 @@ export function createMatterApplicationService(database: Database): MatterApplic
       if (updated === undefined) throw new Error('Matter transition did not produce a matter');
       return updated;
     },
-    listNotes: (institutionId, matterId) => findMatterNotes(database, institutionId, matterId),
+    listNotes: (input) => findMatterNotesAuthorized(database, {
+      institutionId: input.institutionId,
+      matterId: input.matterId,
+      authorizationContext: input.authorization,
+    }),
     async addNote(input) {
       return addMatterNoteAtomically(database, {
         id: input.id,
@@ -319,11 +327,19 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     '/matters/:id/notes',
     { preHandler, schema: { params: MatterIdParamsSchema, response: notesResponseSchemas } },
     async (request) => {
-      const matter = await service.byId(request.principal.institutionId, request.params.id);
-      if (matter === undefined) throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
-      authorizeMatterRead(request.principal, matter);
-      const notes = await service.listNotes(request.principal.institutionId, request.params.id);
-      return { items: notes.map(toMatterNote) };
+      try {
+        const notes = await service.listNotes({
+          institutionId: request.principal.institutionId,
+          matterId: request.params.id,
+          authorization: request.principal.authorization,
+        });
+        return { items: notes.map(toMatterNote) };
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
+        if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+        if (error instanceof Error && error.message === 'Matter not found') throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
+        throw error;
+      }
     },
   );
   app.post<{ Params: { id: string }; Body: MatterNoteRequest; Reply: MatterNotesResponse['items'][number] }>(

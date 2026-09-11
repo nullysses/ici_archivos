@@ -170,4 +170,21 @@ describe('matter registration and read routes', () => {
     expect((await app.inject({ method: 'POST', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' }, payload: { content: 'x', authorUserId: userId } })).statusCode).toBe(201);
     expect((await app.inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' } })).statusCode).toBe(200);
   });
+
+  it('lists notes through the authorized service operation without a separate matter read', async () => {
+    const note: MatterNoteReadModel = { id: '10000000-0000-4000-8000-000000000006', institution_id: institutionId, matter_id: matterId, author_user_id: userId, note_type: 'NOTE', content: 'Note', created_at: matter.updated_at };
+    const base = serviceFixture();
+    const service: MatterApplicationService = {
+      ...base,
+      byId: () => { throw new Error('note listing must not perform a separate matter read'); },
+      listNotes: (input) => {
+        expect(input).toMatchObject({ institutionId, matterId, authorization: defaultAuthorization });
+        return Promise.resolve([note]);
+      },
+    };
+    app = await createTestApp(service);
+    const response = await app.inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ items: [{ id: note.id, matterId, authorUserId: userId, noteType: 'NOTE', content: 'Note', createdAt: note.created_at.toISOString() }] });
+  });
 });

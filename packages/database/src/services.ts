@@ -379,8 +379,49 @@ export async function addMatterNoteAtomically(database: Database, input: { reado
 
 export type MatterNoteReadModel = Selectable<MatterNotesTable>;
 
-export async function findMatterNotes(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<readonly MatterNoteReadModel[]> {
-  return withTenantTransaction(database, institutionId, (transaction) => transaction.selectFrom('matter_notes').selectAll().where('institution_id', '=', institutionId).where('matter_id', '=', matterId).orderBy('created_at').orderBy('id').execute());
+/**
+ * Lists notes only after checking the matter's current operational visibility
+ * and effective-unit read capability while the matter row is locked. This
+ * keeps note authorization and retrieval in one transaction, preventing a
+ * reassignment from racing between the authorization check and the read.
+ */
+export async function findMatterNotesAuthorized(
+  database: Database,
+  input: {
+    readonly institutionId: InstitutionId | string;
+    readonly matterId: string;
+    readonly authorizationContext: AuthorizationContext;
+  },
+): Promise<readonly MatterNoteReadModel[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const matter = await transaction
+      .selectFrom('matters')
+      .select(['destination_unit_id', 'intake_metadata'])
+      .where('institution_id', '=', input.institutionId)
+      .where('id', '=', input.matterId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (matter === undefined) throw new Error('Matter not found');
+    if (input.authorizationContext.institutionId !== String(input.institutionId)) {
+      throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Note authorization context does not match the tenant');
+    }
+    const visibility = matter.intake_metadata.operationalVisibility;
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') {
+      throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+    }
+    const effectiveUnit = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, matter.destination_unit_id);
+    if (!canPerform(input.authorizationContext, 'records.read', effectiveUnit ?? undefined)) {
+      throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    }
+    return transaction
+      .selectFrom('matter_notes')
+      .selectAll()
+      .where('institution_id', '=', input.institutionId)
+      .where('matter_id', '=', input.matterId)
+      .orderBy('created_at')
+      .orderBy('id')
+      .execute();
+  });
 }
 
 export async function persistExpedienteTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {

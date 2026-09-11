@@ -146,7 +146,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
 
   it('resolves the union of institution-scoped role permissions without administrator escalation', async () => {
     await withTenantTransaction(app(), institutionA, async (tx) => {
-      const authorizationTime = new Date('2026-09-10T00:00:00.000Z');
+      const authorizationTime = new Date('2026-09-12T00:00:00.000Z');
       const administrator = await resolveEffectivePermissions(tx, institutionA, developmentSeedIds.adminUser, authorizationTime);
       expect([...administrator].sort()).toEqual(['archive_transfer.retry', 'identity.manage', 'institution.configure', 'records.read']);
       await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000020', institution_id: institutionA, user_id: developmentSeedIds.adminUser, role_id: '10000000-0000-4000-8000-000000000002', effective_from: fixedNow }).execute();

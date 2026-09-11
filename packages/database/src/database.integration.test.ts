@@ -20,6 +20,7 @@ import {
 const institutionA = '00000000-0000-4000-8000-000000000001';
 const institutionB = '00000000-0000-4000-8000-000000000002';
 const userA = '00000000-0000-4000-8000-000000000003';
+const userB = '00000000-0000-4000-8000-000000000013';
 const matterA = '00000000-0000-4000-8000-000000000004';
 const matterB = '00000000-0000-4000-8000-000000000005';
 const typeA = '00000000-0000-4000-8000-000000000006';
@@ -48,7 +49,10 @@ describe('PostgreSQL foundation', () => {
       { id: unitA, institution_id: institutionA, code: 'UNIT-A', name: 'Unit A', status: 'ACTIVE' },
       { id: unitB, institution_id: institutionB, code: 'UNIT-B', name: 'Unit B', status: 'ACTIVE' },
     ]).execute();
-    await database.insertInto('users').values({ id: userA, institution_id: institutionA, display_name: 'User A', status: 'ACTIVE' }).execute();
+    await database.insertInto('users').values([
+      { id: userA, institution_id: institutionA, display_name: 'User A', status: 'ACTIVE' },
+      { id: userB, institution_id: institutionB, display_name: 'User B', status: 'ACTIVE' },
+    ]).execute();
     await database.insertInto('expediente_types').values({ id: typeA, institution_id: institutionA, code: 'TEST', name: 'Test type', status: 'ACTIVE' }).execute();
     await database.insertInto('expediente_type_versions').values({
       id: versionA,
@@ -256,5 +260,45 @@ describe('PostgreSQL foundation', () => {
     expect(ownJobs).toHaveLength(1);
     expect(ownJobs[0]).toMatchObject({ status: 'PENDING', attempt_count: 0, correlation_id: 'corr-job', payload: { reason: 'test' } });
     expect(otherJobs).toHaveLength(0);
+  });
+
+  it('hardens the OIDC bootstrap lookup and enforces both active statuses', async () => {
+    await db().insertInto('external_identities').values([
+      { id: '00000000-0000-4000-8000-000000000040', institution_id: institutionA, user_id: userA, issuer: 'https://issuer.example', subject: 'active-subject' },
+      { id: '00000000-0000-4000-8000-000000000041', institution_id: institutionA, user_id: userA, issuer: 'https://issuer.example', subject: 'inactive-institution-subject' },
+      { id: '00000000-0000-4000-8000-000000000042', institution_id: institutionB, user_id: userB, issuer: 'https://issuer.example', subject: 'inactive-user-subject' },
+    ]).execute();
+    const resolveAsApplication = async (subject: string) => db().transaction().execute(async (transaction) => {
+      await sql`SET LOCAL ROLE ici_app`.execute(transaction);
+      return sql<{ institution_id: string; institution_status: string; user_id: string; user_status: string }>`SELECT * FROM public.ici_resolve_external_identity('https://issuer.example', ${subject})`.execute(transaction);
+    });
+    const active = await resolveAsApplication('active-subject');
+    expect(active.rows[0]).toMatchObject({ institution_id: institutionA, institution_status: 'ACTIVE', user_id: userA, user_status: 'ACTIVE' });
+    await db().updateTable('institutions').set({ status: 'SUSPENDED' }).where('id', '=', institutionA).execute();
+    await db().updateTable('users').set({ status: 'DISABLED' }).where('id', '=', userB).execute();
+    const inactiveInstitution = await resolveAsApplication('inactive-institution-subject');
+    expect(inactiveInstitution.rows[0]?.institution_status).toBe('SUSPENDED');
+    const inactiveUser = await resolveAsApplication('inactive-user-subject');
+    expect(inactiveUser.rows[0]?.user_status).toBe('DISABLED');
+    expect(inactiveUser.rows[0]?.institution_status).toBe('ACTIVE');
+  });
+
+  it('restricts bootstrap execution to ici_app and uses a controlled definer search path', async () => {
+    await sql`CREATE ROLE ici_public_test NOLOGIN`.execute(db());
+    const functionInfo = await sql<{ security_type: string; proconfig: string[] | null; execute_public: boolean; execute_app: boolean }>`
+      SELECT p.prosecdef::text AS security_type,
+             p.proconfig,
+             has_function_privilege('ici_public_test', 'public.ici_resolve_external_identity(text,text)', 'EXECUTE') AS execute_public,
+             has_function_privilege('ici_app', 'public.ici_resolve_external_identity(text,text)', 'EXECUTE') AS execute_app
+      FROM pg_proc AS p
+      JOIN pg_namespace AS n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'ici_resolve_external_identity'
+    `.execute(db());
+    expect(functionInfo.rows[0]).toMatchObject({ security_type: 'true', execute_public: false, execute_app: true });
+    expect(functionInfo.rows[0]?.proconfig).toContain('search_path=pg_catalog');
+    await expect(db().transaction().execute(async (transaction) => {
+      await sql`SET LOCAL ROLE ici_public_test`.execute(transaction);
+      await sql`SELECT * FROM public.ici_resolve_external_identity('https://issuer.example', 'active-subject')`.execute(transaction);
+    })).rejects.toThrow(/permission denied/i);
   });
 });

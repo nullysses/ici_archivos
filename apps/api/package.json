@@ -14,8 +14,10 @@
     "@ici/config": "workspace:*",
     "@ici/contracts": "workspace:*",
     "@ici/database": "workspace:*",
-    "fastify": "5.6.0"
+    "fastify": "5.6.0",
+    "jose": "^6.2.12"
   },
-  "devDependencies": { "tsx": "4.23.13" }
+  "devDependencies": {
+    "tsx": "4.23.13"
+  }
 }
-

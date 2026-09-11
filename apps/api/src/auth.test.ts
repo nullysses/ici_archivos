@@ -26,7 +26,7 @@ describe('authenticateAccessToken', () => {
     const institutionId = '90000000-0000-4000-8000-000000000202';
     const unitId = '90000000-0000-4000-8000-000000000203';
     const authorization = { userId, institutionId, institutionCapabilities: new Set(['records.read']), unitCapabilities: new Map([[unitId, new Set(['matter.start'])]]) };
-    databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId, userId, status: 'ACTIVE' });
+    databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId, institutionStatus: 'ACTIVE', userId, userStatus: 'ACTIVE' });
     databaseMocks.resolveAuthorizationContext.mockResolvedValue(authorization);
     const verifier: AccessTokenVerifier = { verify: vi.fn().mockResolvedValue({ issuer, subject, email: 'changed@example.test', permissions: ['identity.manage'], authorizedUnitIds: ['forged-unit'] }) };
 
@@ -43,7 +43,9 @@ describe('authenticateAccessToken', () => {
     const verifier: AccessTokenVerifier = { verify: vi.fn().mockResolvedValue({ issuer: 'https://wrong-issuer.example.test', subject: 'unknown' }) };
     databaseMocks.resolveExternalIdentity.mockResolvedValue(undefined);
     await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
-    databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId: '90000000-0000-4000-8000-000000000204', userId: '90000000-0000-4000-8000-000000000205', status: 'INACTIVE' });
+    databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId: '90000000-0000-4000-8000-000000000204', institutionStatus: 'ACTIVE', userId: '90000000-0000-4000-8000-000000000205', userStatus: 'DISABLED' });
+    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
+    databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId: '90000000-0000-4000-8000-000000000204', institutionStatus: 'SUSPENDED', userId: '90000000-0000-4000-8000-000000000205', userStatus: 'ACTIVE' });
     await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
     expect(databaseMocks.resolveAuthorizationContext).not.toHaveBeenCalled();
   });

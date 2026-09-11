@@ -37,7 +37,7 @@ export async function applyFoundationMigrations(database: Database): Promise<voi
     await sql`select pg_advisory_xact_lock(hashtext('ici_archivos.foundation_migrations'))`.execute(transaction);
     const applied = await transaction.selectFrom('ici_schema_migrations').select('id').execute();
     const appliedIds = new Set(applied.map((row) => row.id));
-    const migrations = ['001_foundation', '002_foundation_hardening', '003_persistence_foundation', '004_step4b_review_hardening', '005_matter_workflow', '006_oidc_identity_lookup', '007_document_parent_version_guard'] as const;
+    const migrations = ['001_foundation', '002_foundation_hardening', '003_persistence_foundation', '004_step4b_review_hardening', '005_matter_workflow', '006_oidc_identity_lookup', '007_document_parent_version_guard', '008_oidc_auth_hardening'] as const;
     for (const migrationId of migrations) {
       if (appliedIds.has(migrationId)) continue;
       const migration = await readFile(new URL(`../migrations/${migrationId}.sql`, import.meta.url), 'utf8');
@@ -51,10 +51,17 @@ export async function setInstitutionContext(executor: DatabaseTransaction, insti
   await sql`select set_config('app.institution_id', ${institution}, true)`.execute(executor);
 }
 
-export async function resolveExternalIdentity(database: Database, issuer: string, subject: string): Promise<{ readonly institutionId: string; readonly userId: string; readonly status: string } | undefined> {
-  const result = await sql<{ institution_id: string; user_id: string; user_status: string }>`select * from ici_resolve_external_identity(${issuer}, ${subject})`.execute(database);
+export interface ExternalIdentityResolution {
+  readonly institutionId: string;
+  readonly institutionStatus: string;
+  readonly userId: string;
+  readonly userStatus: string;
+}
+
+export async function resolveExternalIdentity(database: Database, issuer: string, subject: string): Promise<ExternalIdentityResolution | undefined> {
+  const result = await sql<{ institution_id: string; institution_status: string; user_id: string; user_status: string }>`select * from public.ici_resolve_external_identity(${issuer}, ${subject})`.execute(database);
   const row = result.rows[0];
-  return row === undefined ? undefined : { institutionId: row.institution_id, userId: row.user_id, status: row.user_status };
+  return row === undefined ? undefined : { institutionId: row.institution_id, institutionStatus: row.institution_status, userId: row.user_id, userStatus: row.user_status };
 }
 
 /** Context is transaction-local, so a released pool connection never retains it. */

@@ -58,3 +58,19 @@ docs/
 The AtoM–Archivematica feasibility harness has its own instructions in
 `infra/spikes/archival-integration/README.md` and is deliberately not started by
 the normal ICI development environment.
+
+## Assignment authorization decisions
+
+For operational authorization, the effective unit is the latest
+`matter_assignments.unit_id` once a matter has been assigned. Before the first
+assignment, `matters.destination_unit_id` remains the relevant unit. Matter
+reads, inbox visibility, and subsequent workflow authorization should converge
+on this rule.
+
+One Step 5 policy decision remains to be clarified before the assignment model
+is considered frozen: assigning a specific user currently requires that the
+user be active and belong to the same institution, but does not prove an
+explicit association with the selected assignment unit. Decide whether a target
+user must have explicit membership/authorization in that unit (and which
+existing relation is authoritative for that proof), or whether assignment to
+any active user in the institution is intentionally permitted.

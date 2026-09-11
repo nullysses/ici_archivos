@@ -34,7 +34,7 @@ export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): Api
     databaseUrl: databaseUrl ?? '',
     host: environment.API_HOST ?? '127.0.0.1',
     port: readPort(environment.API_PORT, 3000),
-    webOrigin: environment.WEB_ORIGIN ?? 'http://127.0.0.1:5173',
+    webOrigin: environment.WEB_ORIGIN ?? 'http://127.0.0.1:5174',
     oidcIssuer,
     oidcAudience,
     oidcJwksUri,

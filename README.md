@@ -18,7 +18,7 @@ pnpm infra:up
 pnpm dev
 ```
 
-Open <http://127.0.0.1:5173>. The web application requests `/api/health`, which
+Open <http://127.0.0.1:5174>. The web application requests `/api/health`, which
 Vite proxies to the API at <http://127.0.0.1:3000/health>.
 
 ## Verification
@@ -58,4 +58,3 @@ docs/
 The AtoM–Archivematica feasibility harness has its own instructions in
 `infra/spikes/archival-integration/README.md` and is deliberately not started by
 the normal ICI development environment.
-

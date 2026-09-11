@@ -9,7 +9,7 @@ const databaseMocks = vi.hoisted(() => ({
 
 vi.mock('@ici/database', () => databaseMocks);
 
-import { authenticateAccessToken, type AccessTokenVerifier } from './auth.js';
+import { authenticateAccessToken, UnauthenticatedError, type AccessTokenVerifier } from './auth.js';
 
 type TransactionCallback = (transaction: unknown) => Promise<unknown>;
 
@@ -42,11 +42,11 @@ describe('authenticateAccessToken', () => {
   it('rejects unknown or inactive issuer-subject identities before resolving authorization', async () => {
     const verifier: AccessTokenVerifier = { verify: vi.fn().mockResolvedValue({ issuer: 'https://wrong-issuer.example.test', subject: 'unknown' }) };
     databaseMocks.resolveExternalIdentity.mockResolvedValue(undefined);
-    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
+    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toBeInstanceOf(UnauthenticatedError);
     databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId: '90000000-0000-4000-8000-000000000204', institutionStatus: 'ACTIVE', userId: '90000000-0000-4000-8000-000000000205', userStatus: 'DISABLED' });
-    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
+    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toBeInstanceOf(UnauthenticatedError);
     databaseMocks.resolveExternalIdentity.mockResolvedValue({ institutionId: '90000000-0000-4000-8000-000000000204', institutionStatus: 'SUSPENDED', userId: '90000000-0000-4000-8000-000000000205', userStatus: 'ACTIVE' });
-    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toThrow('UNAUTHENTICATED');
+    await expect(authenticateAccessToken({} as Database, verifier, 'access-token')).rejects.toBeInstanceOf(UnauthenticatedError);
     expect(databaseMocks.resolveAuthorizationContext).not.toHaveBeenCalled();
   });
 });

@@ -70,7 +70,7 @@ describe('JoseAccessTokenVerifier', () => {
       databaseUrl: 'postgres://unused',
       host: '127.0.0.1',
       port: 3000,
-      webOrigin: 'http://127.0.0.1:5173',
+      webOrigin: 'http://127.0.0.1:5174',
       oidcIssuer: issuer,
       oidcAudience: audience,
       oidcJwksUri: undefined,

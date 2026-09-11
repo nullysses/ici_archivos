@@ -1,8 +1,11 @@
 import cors from '@fastify/cors';
 import { HealthResponseSchema, type HealthResponse } from '@ici/contracts';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { AuthenticatedPrincipal } from './auth.js';
+import { installAuthentication, type AuthenticateRequest } from './auth-plugin.js';
 
 export interface AppDependencies {
+  readonly authenticateAccessToken: AuthenticateRequest;
   readonly checkDatabase: () => Promise<boolean>;
   readonly version: string;
   readonly webOrigin: string;
@@ -10,6 +13,7 @@ export interface AppDependencies {
 
 export async function createApp(dependencies: AppDependencies): Promise<FastifyInstance> {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
+  const authenticateRequest = installAuthentication(app, dependencies.authenticateAccessToken);
 
   await app.register(cors, { origin: dependencies.webOrigin });
 
@@ -37,6 +41,18 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
     },
   );
 
+  app.get<{ Reply: Pick<AuthenticatedPrincipal, 'userId' | 'institutionId' | 'issuer' | 'subject'> }>(
+    '/auth/me',
+    { preHandler: (request, reply, done) => {
+      void authenticateRequest(request, reply).then(() => { if (!reply.sent) done(); }).catch(done);
+    } },
+    (request) => ({
+      userId: request.principal.userId,
+      institutionId: request.principal.institutionId,
+      issuer: request.principal.issuer,
+      subject: request.principal.subject,
+    }),
+  );
+
   return app;
 }
-

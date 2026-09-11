@@ -112,4 +112,16 @@ describe('matter registration and read routes', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({ error: { code: 'INVALID_REQUEST', message: 'Referenced intake record is invalid' } });
   });
+
+  it('rejects restricted-group registration and fails closed for restricted reads', async () => {
+    app = await createTestApp({
+      ...serviceFixture(),
+      byId: () => Promise.resolve({ ...matter, intake_metadata: { ...matter.intake_metadata, operationalVisibility: 'RESTRICTED_GROUP' } }),
+    });
+    const registration = await app.inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer token' }, payload: { ...payload, operationalVisibility: 'RESTRICTED_GROUP' } });
+    expect(registration.statusCode).toBe(400);
+    const read = await app.inject({ method: 'GET', url: `/matters/${matterId}`, headers: { authorization: 'Bearer token' } });
+    expect(read.statusCode).toBe(403);
+    expect(read.json()).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+  });
 });

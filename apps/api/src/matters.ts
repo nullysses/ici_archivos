@@ -106,6 +106,7 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     async (request, reply) => {
       const principal = request.principal;
       if (!canPerform(principal.authorization, 'matter.register')) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+      if (request.body.operationalVisibility === 'RESTRICTED_GROUP') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Restricted-group visibility is not available yet');
       const matter = await service.register({ id: randomUUID(), institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, request: request.body });
       return reply.code(201).send(toMatterResponse(matter));
     },
@@ -115,6 +116,8 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     const matter = await lookup;
     if (matter === undefined) throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
     const principal = request.principal;
+    const visibility = matter.intake_metadata.operationalVisibility;
+    if (visibility !== undefined && (visibility !== 'INSTITUTION' && visibility !== 'UNIT')) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     if (!canPerform(principal.authorization, 'records.read', matter.destination_unit_id ?? undefined)) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     const response = toMatterResponse(matter);
     reply.code(200);

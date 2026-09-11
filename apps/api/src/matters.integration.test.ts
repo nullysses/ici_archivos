@@ -94,6 +94,11 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'records.read']), unitCapabilities: new Map() } };
     const invalidReference = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, destinationUnitId: unitB } });
     expect(invalidReference.json()).toEqual({ error: { code: 'INVALID_REQUEST', message: 'Referenced intake record is invalid' } });
+
+    const restrictedId = '11000000-0000-4000-8000-000000000007';
+    await db().insertInto('matters').values({ id: restrictedId, institution_id: institutionA, folio: 'OP-2026-000003', folio_year: 2026, sequence_number: 3, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'restricted', subject: 'restricted', description: 'restricted', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'RESTRICTED_GROUP' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
+    const restrictedRead = await api().inject({ method: 'GET', url: `/matters/${restrictedId}`, headers: { authorization: 'Bearer test' } });
+    expect(restrictedRead.statusCode).toBe(403);
   });
 
   it('rolls back matter, folio, state event, and audit on transactional failure', async () => {

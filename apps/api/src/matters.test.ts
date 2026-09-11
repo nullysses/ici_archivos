@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { MatterReadModel } from '@ici/database';
+import type { MatterInboxReadModel, MatterReadModel } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { MatterHttpError, type MatterApplicationService } from './matters.js';
@@ -35,10 +35,13 @@ function principal(authorization: AuthenticatedPrincipal['authorization']): Auth
 }
 
 function serviceFixture(): MatterApplicationService {
+  const inboxMatter: MatterInboxReadModel = { ...matter, assignment_unit_id: unitId, assignment_user_id: userId, assignment_assigned_at: matter.updated_at };
   return {
     register: () => Promise.resolve(matter),
     byId: (_institution, id) => Promise.resolve(id === matterId ? matter : undefined),
     byFolio: (_institution, folio) => Promise.resolve(folio === matter.folio ? matter : undefined),
+    assign: () => Promise.resolve({ ...matter, status: 'ASSIGNED' }),
+    inbox: () => Promise.resolve([inboxMatter]),
   };
 }
 
@@ -132,5 +135,24 @@ describe('matter registration and read routes', () => {
     });
     const read = await app.inject({ method: 'GET', url: `/matters/${matterId}`, headers: { authorization: 'Bearer token' } });
     expect(read.statusCode).toBe(403);
+  });
+
+  it('assigns and reassigns only with capability scoped to the target unit', async () => {
+    currentPrincipal = principal({ userId, institutionId, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitId, new Set(['matter.assign'])]]) });
+    app = await createTestApp();
+    const assigned = await app.inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer token' }, payload: { unitId, userId } });
+    expect(assigned.statusCode).toBe(200);
+    currentPrincipal = principal({ userId, institutionId, institutionCapabilities: new Set(), unitCapabilities: new Map([['10000000-0000-4000-8000-000000000099', new Set(['matter.assign'])]]) });
+    const forbidden = await app.inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer token' }, payload: { unitId } });
+    expect(forbidden.statusCode).toBe(403);
+  });
+
+  it('requires a reason for reassignment and protects the inbox', async () => {
+    currentPrincipal = principal({ userId, institutionId, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitId, new Set(['matter.assign', 'records.read'])]]) });
+    app = await createTestApp();
+    const missingReason = await app.inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer token' }, payload: { unitId } });
+    expect(missingReason.statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/matters/inbox', headers: { authorization: 'Bearer token' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/matters/inbox' })).statusCode).toBe(401);
   });
 });

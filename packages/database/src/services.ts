@@ -212,13 +212,55 @@ export async function assignMatterAtomically(database: Database, input: MatterAs
   const toStatus = 'ASSIGNED' as const;
   assertTransition(input.command, input.fromStatus, toStatus, matterTransitions);
   if (input.command === 'reassignMatter') requireReason(input.reason, input.command);
-  await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: auditEventType(matterAuditEvents, input.command), aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, beforeData: { status: input.fromStatus }, afterData: { status: toStatus }, eventData: input.reason === undefined ? {} : { reason: input.reason } }, async (transaction) => {
+  await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: auditEventType(matterAuditEvents, input.command), aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, beforeData: { status: input.fromStatus }, afterData: { status: toStatus }, eventData: { assignmentId: input.assignmentId, unitId: input.unitId, ...(input.userId === undefined ? {} : { userId: input.userId }), ...(input.reason === undefined ? {} : { reason: input.reason }) } }, async (transaction) => {
     const current = await transaction.selectFrom('matters').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forUpdate().executeTakeFirst();
     if (current === undefined) throw new Error('Matter not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Matter is ${current.status}, expected ${input.fromStatus}`);
+    const unit = await transaction.selectFrom('organizational_units').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.unitId).where('status', '=', 'ACTIVE').executeTakeFirst();
+    if (unit === undefined) throw new DomainInvariantError('TARGET_UNIT_NOT_FOUND', 'Assignment target unit was not found');
+    if (input.userId !== undefined) {
+      const user = await transaction.selectFrom('users').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.userId).where('status', '=', 'ACTIVE').executeTakeFirst();
+      if (user === undefined) throw new DomainInvariantError('TARGET_USER_NOT_FOUND', 'Assignment target user was not found');
+    }
     await transaction.insertInto('matter_assignments').values({ id: input.assignmentId, institution_id: input.institutionId, matter_id: input.matterId, unit_id: input.unitId, ...(input.userId === undefined ? {} : { user_id: input.userId }), ...(input.reason === undefined ? {} : { reason: input.reason }), assigned_at: input.assignedAt }).execute();
     await transaction.updateTable('matters').set({ status: toStatus, updated_at: new Date() }).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).execute();
-    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.matterId, from_status: input.fromStatus, to_status: toStatus, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(input.reason === undefined ? {} : { reason: input.reason }), event_data: { assignmentId: input.assignmentId, unitId: input.unitId }, occurred_at: input.assignedAt }).execute();
+    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.matterId, from_status: input.fromStatus, to_status: toStatus, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(input.reason === undefined ? {} : { reason: input.reason }), event_data: { assignmentId: input.assignmentId, unitId: input.unitId, ...(input.userId === undefined ? {} : { userId: input.userId }) }, occurred_at: input.assignedAt }).execute();
+  });
+}
+
+export interface MatterInboxReadModel extends MatterReadModel {
+  readonly assignment_unit_id: string;
+  readonly assignment_user_id: string | null;
+  readonly assignment_assigned_at: Date | string;
+}
+
+export async function findMatterInbox(
+  database: Database,
+  institutionId: InstitutionId | string,
+  userId: string,
+  authorizedUnitIds: readonly string[],
+  institutionWideRead: boolean,
+): Promise<readonly MatterInboxReadModel[]> {
+  return withTenantTransaction(database, institutionId, async (transaction) => {
+    const unitPredicate = authorizedUnitIds.length === 0
+      ? sql`false`
+      : sql`a.unit_id in (${sql.join(authorizedUnitIds.map((id) => sql`${id}`), sql`, `)})`;
+    const result = await sql<MatterInboxReadModel>`
+      select m.*, a.unit_id as assignment_unit_id, a.user_id as assignment_user_id,
+             a.assigned_at as assignment_assigned_at
+      from matters m
+      cross join lateral (
+        select ma.unit_id, ma.user_id, ma.assigned_at
+        from matter_assignments ma
+        where ma.institution_id = m.institution_id and ma.matter_id = m.id
+        order by ma.assigned_at desc, ma.id desc
+        limit 1
+      ) a
+      where m.institution_id = ${institutionId}
+        and (a.user_id = ${userId} or ${institutionWideRead} or ${unitPredicate})
+      order by m.updated_at desc, m.id desc
+    `.execute(transaction);
+    return result.rows;
   });
 }
 

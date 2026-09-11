@@ -113,4 +113,38 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect(await db().selectFrom('audit_events').select('id').where('aggregate_id', '=', id).execute()).toHaveLength(0);
     expect((await db().selectFrom('folio_counters').select('next_value').where('institution_id', '=', institutionA).where('folio_kind', '=', 'MATTER').where('folio_year', '=', 2026).executeTakeFirstOrThrow()).next_value).toBe('3');
   });
+
+  it('assigns and reassigns atomically, validates targets, and serves the scoped inbox', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.assign', 'records.read'])]]) } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2027-09-11T12:00:00.000Z' } });
+    expect(created.statusCode).toBe(201);
+    const matterId = created.json<{ id: string }>().id;
+    const assigned = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userA } });
+    expect(assigned.statusCode).toBe(200);
+    expect(assigned.json<{ status: string }>().status).toBe('ASSIGNED');
+    expect(await db().selectFrom('matter_assignments').selectAll().where('matter_id', '=', matterId).execute()).toHaveLength(1);
+    expect(await db().selectFrom('matter_state_events').selectAll().where('matter_id', '=', matterId).execute()).toHaveLength(2);
+    expect(await db().selectFrom('audit_events').selectAll().where('aggregate_id', '=', matterId).execute()).toHaveLength(2);
+    const inbox = await api().inject({ method: 'GET', url: '/matters/inbox', headers: { authorization: 'Bearer test' } });
+    expect(inbox.statusCode).toBe(200);
+    expect(inbox.json<{ items: Array<{ id: string; assignmentUnitId: string }> }>().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: matterId, assignmentUnitId: unitA })]));
+
+    const missingReason = await api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA } });
+    expect(missingReason.statusCode).toBe(400);
+    const invalidUser = await api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: institutionB, reason: 'Move' } });
+    expect(invalidUser.statusCode).toBe(400);
+    expect(await db().selectFrom('matter_assignments').selectAll().where('matter_id', '=', matterId).execute()).toHaveLength(1);
+
+    const reassigned = await api().inject({ method: 'POST', url: `/matters/${matterId}/reassign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userA, reason: 'Updated target' } });
+    expect(reassigned.statusCode).toBe(200);
+    expect(await db().selectFrom('matter_assignments').selectAll().where('matter_id', '=', matterId).execute()).toHaveLength(2);
+  });
+
+  it('rejects assignment outside the principal capability scope', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['records.read'])]]) } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2028-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    const forbidden = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitB } });
+    expect(forbidden.statusCode).toBe(403);
+  });
 });

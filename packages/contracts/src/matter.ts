@@ -61,6 +61,28 @@ export const MatterResponseSchema = Type.Object({
 
 export type MatterResponse = Static<typeof MatterResponseSchema>;
 
+export const MatterAssignmentRequestSchema = Type.Object({
+  unitId: Uuid,
+  userId: Type.Optional(Uuid),
+  reason: Type.Optional(NonBlank(4000)),
+}, { additionalProperties: false, $id: 'MatterAssignmentRequest' });
+export type MatterAssignmentRequest = Static<typeof MatterAssignmentRequestSchema>;
+
+export const MatterInboxItemSchema = Type.Intersect([
+  MatterResponseSchema,
+  Type.Object({
+    assignmentUnitId: Uuid,
+    assignmentUserId: Type.Union([Uuid, Type.Null()]),
+    assignedAt: DateTime,
+  }),
+], { $id: 'MatterInboxItem' });
+export type MatterInboxItem = Static<typeof MatterInboxItemSchema>;
+
+export const MatterInboxResponseSchema = Type.Object({
+  items: Type.Array(MatterInboxItemSchema),
+}, { additionalProperties: false, $id: 'MatterInboxResponse' });
+export type MatterInboxResponse = Static<typeof MatterInboxResponseSchema>;
+
 export const MatterIdParamsSchema = Type.Object({ id: Uuid }, { additionalProperties: false, $id: 'MatterIdParams' });
 export type MatterIdParams = Static<typeof MatterIdParamsSchema>;
 

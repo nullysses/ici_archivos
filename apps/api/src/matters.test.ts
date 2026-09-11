@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { MatterInboxReadModel, MatterReadModel } from '@ici/database';
+import type { MatterInboxReadModel, MatterNoteReadModel, MatterReadModel } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { MatterHttpError, type MatterApplicationService } from './matters.js';
@@ -36,6 +36,7 @@ function principal(authorization: AuthenticatedPrincipal['authorization']): Auth
 
 function serviceFixture(): MatterApplicationService {
   const inboxMatter: MatterInboxReadModel = { ...matter, assignment_unit_id: unitId, assignment_user_id: userId, assignment_assigned_at: matter.updated_at };
+  const note: MatterNoteReadModel = { id: '10000000-0000-4000-8000-000000000006', institution_id: institutionId, matter_id: matterId, author_user_id: userId, note_type: 'NOTE', content: 'Note', created_at: matter.updated_at };
   return {
     register: () => Promise.resolve(matter),
     byId: (_institution, id) => Promise.resolve(id === matterId ? matter : undefined),
@@ -44,6 +45,9 @@ function serviceFixture(): MatterApplicationService {
       ? Promise.resolve({ ...matter, status: 'ASSIGNED' })
       : Promise.reject(new MatterHttpError(403, 'FORBIDDEN', 'Access denied')),
     inbox: () => Promise.resolve([inboxMatter]),
+    transition: () => Promise.resolve(matter),
+    listNotes: () => Promise.resolve([]),
+    addNote: () => Promise.resolve(note),
   };
 }
 
@@ -156,5 +160,14 @@ describe('matter registration and read routes', () => {
     expect(missingReason.statusCode).toBe(400);
     expect((await app.inject({ method: 'GET', url: '/matters/inbox', headers: { authorization: 'Bearer token' } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/matters/inbox' })).statusCode).toBe(401);
+  });
+
+  it('exposes guarded transition and note contracts without caller identity fields', async () => {
+    app = await createTestApp();
+    expect((await app.inject({ method: 'POST', url: `/matters/${matterId}/start`, payload: {} })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer token' }, payload: {} })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: `/matters/${matterId}/void`, headers: { authorization: 'Bearer token' }, payload: { reason: '' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' }, payload: { content: 'x', authorUserId: userId } })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' } })).statusCode).toBe(200);
   });
 });

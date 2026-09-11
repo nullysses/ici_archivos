@@ -194,4 +194,50 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect(assignments[2]?.unit_id).toBe(unitA3);
     expect(assignments[2]?.assigned_at.getTime()).toBeGreaterThan(assignments[1]?.assigned_at.getTime() ?? 0);
   });
+
+  it('runs start, notes, resolve, and void with effective-unit authorization', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.assign'])]]) } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2030-09-11T12:00:00.000Z' } });
+    expect(created.statusCode).toBe(201);
+    const matterId = created.json<{ id: string }>().id;
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userA } })).statusCode).toBe(200);
+
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map() } };
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/start`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitB, new Set(['matter.resolve'])]]) } };
+    expect((await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'wrong-unit' } } })).statusCode).toBe(403);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['records.read', 'matter.start', 'matter.resolve'])]]) } };
+    const note = await api().inject({ method: 'POST', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer test' }, payload: { content: 'Processing note' } });
+    expect(note.statusCode).toBe(201);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['records.read'])]]) } };
+    const consultaNote = await api().inject({ method: 'POST', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer test' }, payload: { content: 'Consulta cannot write' } });
+    expect(consultaNote.statusCode).toBe(403);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['records.read', 'matter.start', 'matter.resolve'])]]) } };
+    const responseNote = await api().inject({ method: 'POST', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer test' }, payload: { noteType: 'RESPONSE', content: 'Response note' } });
+    expect(responseNote.statusCode).toBe(201);
+    const listed = await api().inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer test' } });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json<{ items: Array<{ noteType: string; authorUserId: string }> }>().items.map((item) => item.noteType)).toEqual(['NOTE', 'RESPONSE']);
+    expect(listed.json<{ items: Array<{ authorUserId: string }> }>().items.every((item) => item.authorUserId === userA)).toBe(true);
+    const resolved = await api().inject({ method: 'POST', url: `/matters/${matterId}/resolve`, headers: { authorization: 'Bearer test' }, payload: { resolutionMetadata: { outcome: 'resolved' } } });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json<{ status: string; resolutionMetadata: { outcome: string } }>().resolutionMetadata).toEqual({ outcome: 'resolved' });
+    expect((await db().selectFrom('matter_state_events').selectAll().where('matter_id', '=', matterId).execute())).toHaveLength(4);
+    expect((await db().selectFrom('audit_events').selectAll().where('aggregate_id', '=', matterId).execute()).map((event) => event.event_type)).toEqual(['matter.registered', 'matter.assigned', 'matter.started', 'matter.note_added', 'matter.note_added', 'matter.resolved']);
+
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['matter.void'])]]) } };
+    const voidMatter = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2031-09-11T12:00:00.000Z' } });
+    const voidId = voidMatter.json<{ id: string }>().id;
+    const voided = await api().inject({ method: 'POST', url: `/matters/${voidId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Created in error' } });
+    expect(voided.statusCode).toBe(200);
+    expect(voided.json<{ status: string }>().status).toBe('VOIDED');
+    expect((await db().selectFrom('matter_state_events').selectAll().where('matter_id', '=', voidId).execute()).at(-1)?.reason).toBe('Created in error');
+    const terminalNote = await api().inject({ method: 'POST', url: `/matters/${voidId}/notes`, headers: { authorization: 'Bearer test' }, payload: { content: 'Should fail' } });
+    expect(terminalNote.statusCode).toBe(400);
+
+    const unassigned = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2032-09-11T12:00:00.000Z' } });
+    const unassignedId = unassigned.json<{ id: string }>().id;
+    const invalidStart = await api().inject({ method: 'POST', url: `/matters/${unassignedId}/start`, headers: { authorization: 'Bearer test' }, payload: {} });
+    expect(invalidStart.statusCode).toBe(400);
+  });
 });

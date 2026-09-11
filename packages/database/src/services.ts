@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'kysely';
 import type { Selectable } from 'kysely';
-import type { ArchiveTransferState, AuthorizationContext, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
+import type { ArchiveTransferState, AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { MattersTable } from './schema.js';
+import type { MatterNotesTable, MattersTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -304,18 +304,25 @@ export async function persistMatterTransition(database: Database, input: StateTr
     correlationId: input.correlationId,
     beforeData: { status: input.fromStatus },
     afterData: { status: input.toStatus },
-    eventData: input.eventData,
+    eventData: input.command === 'voidMatter' && reason !== undefined ? { ...(input.eventData ?? {}), reason } : input.eventData,
   }, async (transaction) => {
-    const current = await transaction.selectFrom('matters').select(['status', 'linked_expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).forUpdate().executeTakeFirst();
+    const current = await transaction.selectFrom('matters').select(['status', 'linked_expediente_id', 'destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).forUpdate().executeTakeFirst();
     if (current === undefined) throw new Error('Matter not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Matter is ${current.status}, expected ${input.fromStatus}`);
-    const changes: { status: MatterState; updated_at: Date; resolution_metadata?: JsonObject; closure_metadata?: JsonObject; linked_expediente_id?: string } = { status: input.toStatus as MatterState, updated_at: new Date() };
+    const transitionAt = (await sql<{ occurred_at: Date }>`select clock_timestamp() as occurred_at`.execute(transaction)).rows[0]?.occurred_at;
+    if (transitionAt === undefined) throw new Error('Transition timestamp was not generated');
+    const effectiveUnit = await effectiveMatterUnit(transaction, String(input.institutionId), input.aggregateId, current.destination_unit_id);
+    const authorization = input.authorizationContext;
+    if (input.command === 'startMatter' || input.command === 'resolveMatter' || input.command === 'voidMatter') {
+      if (input.actorUserId === undefined || authorization === undefined || authorization.institutionId !== String(input.institutionId) || authorization.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', `${input.command} requires matching server-derived authorization context`);
+    }
+    if (input.command === 'resolveMatter' && !canPerform(authorization as AuthorizationContext, 'matter.resolve', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot resolve matters for the effective unit');
+    if (input.command === 'voidMatter' && !canPerform(authorization as AuthorizationContext, 'matter.void', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot void matters for the effective unit');
+    const changes: { status: MatterState; updated_at: Date; resolution_metadata?: JsonObject; closure_metadata?: JsonObject; linked_expediente_id?: string } = { status: input.toStatus as MatterState, updated_at: transitionAt };
     if (input.command === 'startMatter') {
       if (input.actorUserId === undefined) throw new DomainInvariantError('ACTOR_REQUIRED', 'startMatter requires an actor');
-      const authorization = input.authorizationContext;
-      if (authorization === undefined || authorization.institutionId !== input.institutionId || authorization.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'startMatter requires matching server-derived authorization context');
-      const assignment = await transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id']).where('institution_id', '=', input.institutionId).where('matter_id', '=', input.aggregateId).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
-      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !canPerform(authorization, 'matter.start', assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or authorized to start matters for the assigned unit');
+      const assignment = await currentMatterAssignment(transaction, String(input.institutionId), input.aggregateId);
+      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !canPerform(authorization as AuthorizationContext, 'matter.start', assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or authorized to start matters for the assigned unit');
     }
     if (input.command === 'resolveMatter') {
       const resolution = objectEventValue(input.eventData, 'resolutionMetadata');
@@ -335,7 +342,7 @@ export async function persistMatterTransition(database: Database, input: StateTr
       changes.closure_metadata = closureMetadata;
     }
     await transaction.updateTable('matters').set(changes).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).execute();
-    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.aggregateId, from_status: input.fromStatus, to_status: input.toStatus as MatterState, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(reason === undefined ? {} : { reason }), event_data: input.eventData ?? {}, occurred_at: new Date() }).execute();
+    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.aggregateId, from_status: input.fromStatus, to_status: input.toStatus as MatterState, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(reason === undefined ? {} : { reason }), event_data: input.eventData ?? {}, occurred_at: transitionAt }).execute();
   });
 }
 
@@ -350,14 +357,30 @@ export async function linkMatterToExpedienteAtomically(database: Database, input
   });
 }
 
-export async function addMatterNoteAtomically(database: Database, input: { readonly id: string; readonly institutionId: InstitutionId | string; readonly matterId: string; readonly authorUserId: string; readonly content: string; readonly noteType?: 'NOTE' | 'RESPONSE'; readonly correlationId: string }): Promise<void> {
+export async function addMatterNoteAtomically(database: Database, input: { readonly id: string; readonly institutionId: InstitutionId | string; readonly matterId: string; readonly authorUserId: string; readonly content: string; readonly noteType?: 'NOTE' | 'RESPONSE'; readonly correlationId: string; readonly authorizationContext: AuthorizationContext }): Promise<MatterNoteReadModel> {
   if (input.content.trim().length === 0 || input.content.length > 10_000) throw new DomainInvariantError('INVALID_NOTE', 'A note must contain at most 10,000 characters');
-  await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.authorUserId, eventType: 'matter.note_added', aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, eventData: { noteId: input.id, noteType: input.noteType ?? 'NOTE' } }, async (transaction) => {
-    const matter = await transaction.selectFrom('matters').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).executeTakeFirst();
+  return withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.authorUserId, eventType: 'matter.note_added', aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, eventData: { noteId: input.id, noteType: input.noteType ?? 'NOTE' } }, async (transaction) => {
+    const matter = await transaction.selectFrom('matters').select(['status', 'destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forUpdate().executeTakeFirst();
     if (matter === undefined) throw new Error('Matter not found');
     if (matter.status === 'CLOSED' || matter.status === 'VOIDED') throw new DomainInvariantError('INVALID_TRANSITION', 'Notes cannot be added to terminal matters');
-    await transaction.insertInto('matter_notes').values({ id: input.id, institution_id: input.institutionId, matter_id: input.matterId, author_user_id: input.authorUserId, note_type: input.noteType ?? 'NOTE', content: input.content }).execute();
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.authorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Note authorization context does not match the actor');
+    const visibility = matter.intake_metadata.operationalVisibility;
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+    const effectiveUnit = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, matter.destination_unit_id);
+    if (!canPerform(input.authorizationContext, 'records.read', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    const writeCapabilities: readonly Capability[] = ['matter.assign', 'matter.void', 'matter.start', 'matter.resolve', 'matter.reopen', 'matter.close'];
+    if (!writeCapabilities.some((capability) => canPerform(input.authorizationContext, capability, effectiveUnit ?? undefined))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot write matter notes for the effective unit');
+    const createdAt = (await sql<{ created_at: Date }>`select clock_timestamp() as created_at`.execute(transaction)).rows[0]?.created_at;
+    if (createdAt === undefined) throw new Error('Note timestamp was not generated');
+    await transaction.insertInto('matter_notes').values({ id: input.id, institution_id: input.institutionId, matter_id: input.matterId, author_user_id: input.authorUserId, note_type: input.noteType ?? 'NOTE', content: input.content, created_at: createdAt }).execute();
+    return { id: input.id, institution_id: input.institutionId, matter_id: input.matterId, author_user_id: input.authorUserId, note_type: input.noteType ?? 'NOTE', content: input.content, created_at: createdAt };
   });
+}
+
+export type MatterNoteReadModel = Selectable<MatterNotesTable>;
+
+export async function findMatterNotes(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<readonly MatterNoteReadModel[]> {
+  return withTenantTransaction(database, institutionId, (transaction) => transaction.selectFrom('matter_notes').selectAll().where('institution_id', '=', institutionId).where('matter_id', '=', matterId).orderBy('created_at').orderBy('id').execute());
 }
 
 export async function persistExpedienteTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {

@@ -83,6 +83,36 @@ export const MatterInboxResponseSchema = Type.Object({
 }, { additionalProperties: false, $id: 'MatterInboxResponse' });
 export type MatterInboxResponse = Static<typeof MatterInboxResponseSchema>;
 
+export const MatterStartRequestSchema = Type.Object({}, { additionalProperties: false, $id: 'MatterStartRequest' });
+export type MatterStartRequest = Static<typeof MatterStartRequestSchema>;
+
+export const MatterResolveRequestSchema = Type.Object({
+  resolutionMetadata: JsonObjectSchema,
+}, { additionalProperties: false, $id: 'MatterResolveRequest' });
+export type MatterResolveRequest = Static<typeof MatterResolveRequestSchema>;
+
+export const MatterVoidRequestSchema = Type.Object({ reason: NonBlank(4000) }, { additionalProperties: false, $id: 'MatterVoidRequest' });
+export type MatterVoidRequest = Static<typeof MatterVoidRequestSchema>;
+
+export const MatterNoteRequestSchema = Type.Object({
+  noteType: Type.Optional(Type.Union([Type.Literal('NOTE'), Type.Literal('RESPONSE')])),
+  content: NonBlank(10_000),
+}, { additionalProperties: false, $id: 'MatterNoteRequest' });
+export type MatterNoteRequest = Static<typeof MatterNoteRequestSchema>;
+
+export const MatterNoteSchema = Type.Object({
+  id: Uuid,
+  matterId: Uuid,
+  authorUserId: Uuid,
+  noteType: Type.Union([Type.Literal('NOTE'), Type.Literal('RESPONSE')]),
+  content: Type.String({ minLength: 1, maxLength: 10_000 }),
+  createdAt: DateTime,
+}, { additionalProperties: false, $id: 'MatterNote' });
+export type MatterNote = Static<typeof MatterNoteSchema>;
+
+export const MatterNotesResponseSchema = Type.Object({ items: Type.Array(MatterNoteSchema) }, { additionalProperties: false, $id: 'MatterNotesResponse' });
+export type MatterNotesResponse = Static<typeof MatterNotesResponseSchema>;
+
 export const MatterIdParamsSchema = Type.Object({ id: Uuid }, { additionalProperties: false, $id: 'MatterIdParams' });
 export type MatterIdParams = Static<typeof MatterIdParamsSchema>;
 

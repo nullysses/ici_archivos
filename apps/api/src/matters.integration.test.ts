@@ -99,6 +99,10 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     await db().insertInto('matters').values({ id: restrictedId, institution_id: institutionA, folio: 'OP-2026-000003', folio_year: 2026, sequence_number: 3, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'restricted', subject: 'restricted', description: 'restricted', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'RESTRICTED_GROUP' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
     const restrictedRead = await api().inject({ method: 'GET', url: `/matters/${restrictedId}`, headers: { authorization: 'Bearer test' } });
     expect(restrictedRead.statusCode).toBe(403);
+    const legacyId = '11000000-0000-4000-8000-000000000008';
+    await db().insertInto('matters').values({ id: legacyId, institution_id: institutionA, folio: 'OP-2026-000004', folio_year: 2026, sequence_number: 4, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'legacy', subject: 'legacy', description: 'legacy', priority: 'NORMAL', channel: 'EMAIL' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
+    const legacyRead = await api().inject({ method: 'GET', url: `/matters/${legacyId}`, headers: { authorization: 'Bearer test' } });
+    expect(legacyRead.statusCode).toBe(403);
   });
 
   it('rolls back matter, folio, state event, and audit on transactional failure', async () => {

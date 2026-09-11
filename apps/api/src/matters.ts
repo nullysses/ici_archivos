@@ -117,7 +117,7 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     if (matter === undefined) throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
     const principal = request.principal;
     const visibility = matter.intake_metadata.operationalVisibility;
-    if (visibility !== undefined && (visibility !== 'INSTITUTION' && visibility !== 'UNIT')) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     if (!canPerform(principal.authorization, 'records.read', matter.destination_unit_id ?? undefined)) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     const response = toMatterResponse(matter);
     reply.code(200);

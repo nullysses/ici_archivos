@@ -124,4 +124,13 @@ describe('matter registration and read routes', () => {
     expect(read.statusCode).toBe(403);
     expect(read.json()).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
   });
+
+  it('fails closed when legacy matter metadata has no operational visibility', async () => {
+    app = await createTestApp({
+      ...serviceFixture(),
+      byId: () => Promise.resolve({ ...matter, intake_metadata: { sender: 'legacy', subject: 'legacy', description: 'legacy', priority: 'NORMAL', channel: 'EMAIL' } }),
+    });
+    const read = await app.inject({ method: 'GET', url: `/matters/${matterId}`, headers: { authorization: 'Bearer token' } });
+    expect(read.statusCode).toBe(403);
+  });
 });

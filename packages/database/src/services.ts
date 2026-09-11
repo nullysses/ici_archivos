@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'kysely';
+import type { Selectable } from 'kysely';
 import type { ArchiveTransferState, AuthorizationContext, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
+import type { MattersTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -93,11 +95,21 @@ export interface RegisterMatterPersistenceInput {
   readonly correlationId: string;
   readonly actorUserId?: string;
   readonly year: number;
+  /** Optional for legacy fixtures; operational registration supplies both. */
+  readonly destinationUnitId?: string;
+  readonly accessClassificationId?: string;
 }
 
 export async function registerMatterAtomically(database: Database, input: RegisterMatterPersistenceInput): Promise<{ readonly folio: string }> {
   if (Object.keys(input.intakeMetadata).length === 0) throw new DomainInvariantError('INVALID_INTAKE', 'Matter intake metadata is required');
+  if ((input.destinationUnitId === undefined) !== (input.accessClassificationId === undefined)) throw new DomainInvariantError('INVALID_INTAKE_REFERENCES', 'Destination unit and access classification must be supplied together');
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.destinationUnitId !== undefined && input.accessClassificationId !== undefined) {
+      const unit = await transaction.selectFrom('organizational_units').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.destinationUnitId).where('status', '=', 'ACTIVE').executeTakeFirst();
+      if (unit === undefined) throw new DomainInvariantError('DESTINATION_UNIT_NOT_FOUND', 'Destination unit was not found');
+      const classification = await transaction.selectFrom('access_classifications').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.accessClassificationId).executeTakeFirst();
+      if (classification === undefined) throw new DomainInvariantError('ACCESS_CLASSIFICATION_NOT_FOUND', 'Access classification was not found');
+    }
     const allocated = await allocateFolio(transaction, { institutionId: input.institutionId, folioKind: 'MATTER', folioYear: input.year });
     await transaction.insertInto('matters').values({
       id: input.id,
@@ -109,6 +121,8 @@ export async function registerMatterAtomically(database: Database, input: Regist
       received_at: input.receivedAt,
       intake_metadata: input.intakeMetadata,
       ...(input.createdBy === undefined ? {} : { created_by: input.createdBy }),
+      ...(input.destinationUnitId === undefined ? {} : { destination_unit_id: input.destinationUnitId }),
+      ...(input.accessClassificationId === undefined ? {} : { access_classification_id: input.accessClassificationId }),
     }).execute();
     await transaction.insertInto('matter_state_events').values({
       institution_id: input.institutionId,
@@ -130,6 +144,16 @@ export async function registerMatterAtomically(database: Database, input: Regist
     });
     return allocated;
   });
+}
+
+export type MatterReadModel = Selectable<MattersTable>;
+
+export async function findMatterById(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<MatterReadModel | undefined> {
+  return withTenantTransaction(database, institutionId, (transaction) => transaction.selectFrom('matters').selectAll().where('institution_id', '=', institutionId).where('id', '=', matterId).executeTakeFirst());
+}
+
+export async function findMatterByFolio(database: Database, institutionId: InstitutionId | string, folio: string): Promise<MatterReadModel | undefined> {
+  return withTenantTransaction(database, institutionId, (transaction) => transaction.selectFrom('matters').selectAll().where('institution_id', '=', institutionId).where('folio', '=', folio).executeTakeFirst());
 }
 
 export interface CreateExpedientePersistenceInput {

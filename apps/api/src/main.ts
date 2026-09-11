@@ -3,6 +3,7 @@ import { checkDatabase, createDatabase } from '@ici/database';
 import { createApp } from './app.js';
 import { authenticateAccessToken, UnauthenticatedError, type AccessTokenVerifier } from './auth.js';
 import { createJoseAccessTokenVerifier } from './oidc.js';
+import { createMatterApplicationService } from './matters.js';
 
 const config = readApiConfig();
 const database = createDatabase(config.databaseUrl);
@@ -12,6 +13,7 @@ const accessTokenVerifier: AccessTokenVerifier = hasOidcConfiguration
   : { verify: () => Promise.reject(new UnauthenticatedError()) };
 const app = await createApp({
   authenticateAccessToken: (accessToken) => authenticateAccessToken(database, accessTokenVerifier, accessToken),
+  matterService: createMatterApplicationService(database),
   checkDatabase: () => checkDatabase(database),
   version: process.env.npm_package_version ?? '0.0.0',
   webOrigin: config.webOrigin,

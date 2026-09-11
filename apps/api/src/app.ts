@@ -3,9 +3,11 @@ import { HealthResponseSchema, type HealthResponse } from '@ici/contracts';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { installAuthentication, type AuthenticateRequest } from './auth-plugin.js';
+import { installMatterRoutes, type MatterApplicationService, MatterHttpError } from './matters.js';
 
 export interface AppDependencies {
   readonly authenticateAccessToken: AuthenticateRequest;
+  readonly matterService?: MatterApplicationService;
   readonly checkDatabase: () => Promise<boolean>;
   readonly version: string;
   readonly webOrigin: string;
@@ -16,6 +18,12 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   const authenticateRequest = installAuthentication(app, dependencies.authenticateAccessToken);
 
   await app.register(cors, { origin: dependencies.webOrigin });
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof MatterHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if ((error as { readonly code?: unknown }).code === 'FST_ERR_VALIDATION') return reply.code(400).send({ error: { code: 'INVALID_REQUEST', message: 'Request validation failed' } });
+    request.log.error(error);
+    return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+  });
 
   app.get<{ Reply: HealthResponse }>(
     '/health',
@@ -53,6 +61,8 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       subject: request.principal.subject,
     }),
   );
+
+  if (dependencies.matterService !== undefined) installMatterRoutes(app, dependencies.matterService, dependencies.authenticateAccessToken);
 
   return app;
 }

@@ -40,7 +40,9 @@ function serviceFixture(): MatterApplicationService {
     register: () => Promise.resolve(matter),
     byId: (_institution, id) => Promise.resolve(id === matterId ? matter : undefined),
     byFolio: (_institution, folio) => Promise.resolve(folio === matter.folio ? matter : undefined),
-    assign: () => Promise.resolve({ ...matter, status: 'ASSIGNED' }),
+    assign: (input) => input.authorization.unitCapabilities.has(input.request.unitId)
+      ? Promise.resolve({ ...matter, status: 'ASSIGNED' })
+      : Promise.reject(new MatterHttpError(403, 'FORBIDDEN', 'Access denied')),
     inbox: () => Promise.resolve([inboxMatter]),
   };
 }

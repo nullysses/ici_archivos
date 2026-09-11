@@ -52,6 +52,7 @@ export interface MatterApplicationService {
     readonly matterId: string;
     readonly command: 'assignMatter' | 'reassignMatter';
     readonly request: MatterAssignmentRequest;
+    readonly authorization: AuthenticatedPrincipal['authorization'];
   }): Promise<MatterReadModel>;
   inbox(input: {
     readonly institutionId: string;
@@ -117,11 +118,13 @@ export function createMatterApplicationService(database: Database): MatterApplic
           command: input.command,
           fromStatus: current.status as 'RECEIVED' | 'ASSIGNED' | 'IN_PROGRESS',
           ...(input.request.reason === undefined ? {} : { reason: input.request.reason }),
+          authorizationContext: input.authorization,
           assignedAt: new Date(),
         });
       } catch (error) {
         const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
         if (code === 'TARGET_UNIT_NOT_FOUND' || code === 'TARGET_USER_NOT_FOUND') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Assignment target is invalid');
+        if (code === 'NOT_AUTHORIZED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
         if (code === 'REASON_REQUIRED') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Reassignment reason is required');
         if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION') throw new MatterHttpError(400, 'INVALID_TRANSITION', 'Matter state changed; retry the command');
         throw error;
@@ -178,9 +181,8 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
 
   const assignment = (command: 'assignMatter' | 'reassignMatter') => async (request: FastifyRequest<{ Params: { id: string }; Body: MatterAssignmentRequest }>, reply: FastifyReply): Promise<MatterResponse> => {
     const principal = request.principal;
-    if (!canPerform(principal.authorization, 'matter.assign', request.body.unitId)) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     if (command === 'reassignMatter' && (request.body.reason === undefined || request.body.reason.trim().length === 0)) throw new MatterHttpError(400, 'INVALID_REQUEST', 'Reassignment reason is required');
-    const matter = await service.assign({ institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, matterId: request.params.id, command, request: request.body });
+    const matter = await service.assign({ institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, matterId: request.params.id, command, request: request.body, authorization: principal.authorization });
     reply.code(200);
     return toMatterResponse(matter);
   };
@@ -208,7 +210,7 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     const principal = request.principal;
     const visibility = matter.intake_metadata.operationalVisibility;
     if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
-    if (!canPerform(principal.authorization, 'records.read', matter.destination_unit_id ?? undefined)) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+    if (!canPerform(principal.authorization, 'records.read', matter.effective_unit_id ?? matter.destination_unit_id ?? undefined)) throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
     const response = toMatterResponse(matter);
     reply.code(200);
     return response;

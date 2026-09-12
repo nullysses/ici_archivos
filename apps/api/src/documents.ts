@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { once } from 'node:events';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import {
@@ -17,7 +23,7 @@ import type { AuthenticatedPrincipal } from './auth.js';
 import { createAuthenticationGuard, type AuthenticateRequest } from './auth-plugin.js';
 import {
   assertAllowedDetectedMimeType, DocumentSizeLimitError, documentStorageKey,
-  inspectDocumentStream, type DocumentMimeDetector, type DocumentStoragePort,
+  type DocumentMimeDetector, type DocumentStoragePort,
   UnsupportedDocumentMimeError,
   FileTypeDocumentMimeDetector,
 } from '@ici/integration-storage';
@@ -67,19 +73,20 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
     const fields = parsed.fields;
     if (fields.documentType === undefined || fields.title === undefined) { await safeRemove(dependencies.storage, storageKey); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'documentType and title are required'); }
     const upload = parsed.upload;
+    let accepted;
     try {
-      const accepted = await acceptMatterDocumentUploadAtomically(dependencies.database, {
+      accepted = await acceptMatterDocumentUploadAtomically(dependencies.database, {
         documentId: randomUUID(), versionId, institutionId: principal.institutionId, matterId: request.params.matterId,
         documentType: fields.documentType, title: fields.title, originalFilename: upload.filename,
         detectedMimeType: upload.detectedMimeType, ...(upload.declaredMimeType === undefined ? {} : { declaredMimeType: upload.declaredMimeType }),
         sizeBytes: upload.sizeBytes, sha256: upload.sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: principal.userId,
         correlationId: request.id, authorizationContext: principal.authorization,
       });
-      return reply.code(202).send({ document: toDocumentResponse({ document: accepted.document, versions: [accepted.version] }), version: toVersionResponse(accepted.version) });
     } catch (error) {
       await safeRemove(dependencies.storage, storageKey);
       throw mapDocumentError(error);
     }
+    return reply.code(202).send({ document: toDocumentResponse({ document: accepted.document, versions: [accepted.version] }), version: toVersionResponse(accepted.version) });
   });
 
   app.post<{ Params: { documentId: string } }>('/documents/:documentId/versions', { preHandler, schema: { params: DocumentIdParamsSchema, response: { 202: DocumentUploadResponseSchema, ...errors } } }, async (request, reply) => {
@@ -92,20 +99,21 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
     const fields = parsed.fields;
     if (fields.replacementReason === undefined) { await safeRemove(dependencies.storage, storageKey); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'replacementReason is required'); }
     const upload = parsed.upload;
+    let accepted;
     try {
-      const accepted = await acceptMatterDocumentVersionUploadAtomically(dependencies.database, {
+      accepted = await acceptMatterDocumentVersionUploadAtomically(dependencies.database, {
         documentId: request.params.documentId, versionId, institutionId: principal.institutionId, originalFilename: upload.filename,
         detectedMimeType: upload.detectedMimeType, ...(upload.declaredMimeType === undefined ? {} : { declaredMimeType: upload.declaredMimeType }),
         sizeBytes: upload.sizeBytes, sha256: upload.sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: principal.userId,
         replacementReason: fields.replacementReason, correlationId: request.id, authorizationContext: principal.authorization,
       });
-      const model = await findMatterDocumentVersions(dependencies.database, principal.institutionId, request.params.documentId);
-      if (model === undefined) throw new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
-      return reply.code(202).send({ document: toDocumentResponse(model), version: toVersionResponse(accepted.version) });
     } catch (error) {
       await safeRemove(dependencies.storage, storageKey);
       throw mapDocumentError(error);
     }
+    const model = await findMatterDocumentVersions(dependencies.database, principal.institutionId, request.params.documentId);
+    if (model === undefined) throw new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
+    return reply.code(202).send({ document: toDocumentResponse(model), version: toVersionResponse(accepted.version) });
   });
 
   app.get<{ Params: { matterId: string } }>('/matters/:matterId/documents', { preHandler, schema: { params: MatterDocumentParamsSchema, response: { 200: MatterDocumentsResponseSchema, ...errors } } }, async (request) => {
@@ -144,32 +152,62 @@ async function processUpload(request: FastifyRequest, dependencies: DocumentAppl
   let upload: UploadResult | undefined;
   for await (const part of request.parts()) {
     if (part.type === 'field') {
-      if (part.fieldname === 'documentType' || part.fieldname === 'title' || part.fieldname === 'replacementReason') fields[part.fieldname] = String(part.value);
+      if (part.fieldname === 'documentType' || part.fieldname === 'title' || part.fieldname === 'replacementReason') {
+        const value = String(part.value).trim();
+        const limit = part.fieldname === 'documentType' ? 200 : part.fieldname === 'title' ? 1000 : 4000;
+        if (value.length === 0 || value.length > limit) { if (upload !== undefined) await safeRemove(dependencies.storage, key); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Multipart field is invalid'); }
+        fields[part.fieldname] = value;
+      }
       continue;
     }
     if (upload !== undefined) { part.file.resume(); await safeRemove(dependencies.storage, key); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required'); }
-    const body = Readable.toWeb(part.file) as ReadableStream<Uint8Array>;
-    const [inspectionBody, storageBody] = body.tee();
-    const storagePromise = dependencies.storage.put({ zone: 'QUARANTINE', key, body: storageBody });
-    let inspected;
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), 'ici-document-'));
+    const temporaryPath = join(temporaryDirectory, 'upload.bin');
     try {
-      inspected = await inspectDocumentStream(inspectionBody, { maxBytes: dependencies.maxBytes ?? DEFAULT_MAX_BYTES, ...(dependencies.detector === undefined ? {} : { detector: dependencies.detector }) });
-      if (part.file.truncated) throw new DocumentSizeLimitError(dependencies.maxBytes ?? DEFAULT_MAX_BYTES);
+      const inspected = await streamToTemporaryFile(part, temporaryPath, dependencies.maxBytes ?? DEFAULT_MAX_BYTES, dependencies.detector);
       assertAllowedDetectedMimeType(inspected.detectedMimeType);
-      await storagePromise;
+      await dependencies.storage.put({ zone: 'QUARANTINE', key, body: Readable.toWeb(createReadStream(temporaryPath)) as ReadableStream<Uint8Array>, sha256: inspected.sha256 });
+      upload = { filename: part.filename, declaredMimeType: part.mimetype === '' ? undefined : part.mimetype, sizeBytes: inspected.sizeBytes.toString(), sha256: inspected.sha256, detectedMimeType: inspected.detectedMimeType };
     } catch (error) {
-      await Promise.allSettled([storagePromise]);
       await safeRemove(dependencies.storage, key);
       throw error;
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
     }
-    upload = { filename: part.filename, declaredMimeType: part.mimetype === '' ? undefined : part.mimetype, sizeBytes: inspected.sizeBytes.toString(), sha256: inspected.sha256, detectedMimeType: inspected.detectedMimeType };
   }
   if (upload === undefined) throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required');
   return { fields, upload };
 }
 
+async function streamToTemporaryFile(part: { readonly file: Readable & { readonly truncated?: boolean } }, path: string, maxBytes: bigint, detector?: DocumentMimeDetector): Promise<{ readonly sizeBytes: bigint; readonly sha256: string; readonly detectedMimeType: string | undefined }> {
+  const output = createWriteStream(path, { flags: 'wx' });
+  const hash = createHash('sha256');
+  const sniffParts: Uint8Array[] = [];
+  let sniffed = 0;
+  let sizeBytes = 0n;
+  try {
+    for await (const chunk of part.file as unknown as AsyncIterable<unknown>) {
+      const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk instanceof Uint8Array ? chunk : (() => { throw new Error('Multipart stream yielded an invalid chunk'); })();
+      sizeBytes += BigInt(bytes.byteLength);
+      if (sizeBytes > maxBytes) throw new DocumentSizeLimitError(maxBytes);
+      hash.update(bytes);
+      if (sniffed < 4100) { const partBytes = bytes.subarray(0, Math.min(bytes.byteLength, 4100 - sniffed)); sniffParts.push(Uint8Array.from(partBytes)); sniffed += partBytes.byteLength; }
+      if (!output.write(bytes)) await once(output, 'drain');
+    }
+    if (part.file.truncated === true) throw new DocumentSizeLimitError(maxBytes);
+    await new Promise<void>((resolve, reject) => { output.end((error?: Error | null) => error == null ? resolve() : reject(error)); });
+  } catch (error) {
+    output.destroy();
+    throw error;
+  }
+  const sniff = new Uint8Array(sniffed);
+  let offset = 0;
+  for (const piece of sniffParts) { sniff.set(piece, offset); offset += piece.byteLength; }
+  return { sizeBytes, sha256: hash.digest('hex'), detectedMimeType: detector === undefined ? undefined : await detector.detect(sniff) };
+}
+
 function toVersionResponse(version: { id: string; document_id: string; version_number: number; original_filename: string; detected_mime_type: string; declared_mime_type: string | null; size_bytes: string; sha256: string; storage_key: string; malware_scan_status: DocumentVersionResponse['malwareScanStatus']; created_by: string; created_at: Date | string; replacement_reason: string | null }): DocumentVersionResponse {
-  return { id: version.id, documentId: version.document_id, versionNumber: version.version_number, originalFilename: version.original_filename, detectedMimeType: version.detected_mime_type, declaredMimeType: version.declared_mime_type, sizeBytes: String(version.size_bytes), sha256: version.sha256, storageKey: version.storage_key, malwareScanStatus: version.malware_scan_status, createdBy: version.created_by, createdAt: new Date(version.created_at).toISOString(), replacementReason: version.replacement_reason };
+  return { id: version.id, documentId: version.document_id, versionNumber: version.version_number, originalFilename: version.original_filename, detectedMimeType: version.detected_mime_type, declaredMimeType: version.declared_mime_type, sizeBytes: String(version.size_bytes), sha256: version.sha256, malwareScanStatus: version.malware_scan_status, createdBy: version.created_by, createdAt: new Date(version.created_at).toISOString(), replacementReason: version.replacement_reason };
 }
 
 function toDocumentResponse(model: { document: { id: string; matter_id: string | null; document_type: string; title: string; current_version_id: string | null; access_classification_id: string | null; created_at: Date | string; updated_at: Date | string }; versions: readonly Parameters<typeof toVersionResponse>[0][] }): DocumentResponse {
@@ -189,6 +227,7 @@ function mapDocumentError(error: unknown): Error {
   if (code === 'DOCUMENT_NOT_AVAILABLE') return new DocumentHttpError(409, 'DOCUMENT_NOT_AVAILABLE', 'Document is not available');
   if (code === 'DOCUMENT_NOT_FOUND' || (error instanceof Error && error.message === 'Document not found')) return new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
   if (code === 'MATTER_NOT_FOUND' || (error instanceof Error && error.message === 'Matter not found')) return new DocumentHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
+  if (code === 'INVALID_DOCUMENT_METADATA' || code === 'REPLACEMENT_REASON_REQUIRED' || code === 'INVALID_SIZE' || code === 'INVALID_SHA256') return new DocumentHttpError(400, 'INVALID_REQUEST', 'Document metadata is invalid');
   if (error instanceof UnsupportedDocumentMimeError) return new DocumentHttpError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Document media type is not supported');
   if (error instanceof DocumentSizeLimitError) return new DocumentHttpError(400, 'INVALID_REQUEST', 'Document exceeds the configured size limit');
   return error instanceof Error ? error : new Error('Document operation failed');

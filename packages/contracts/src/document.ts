@@ -26,7 +26,6 @@ export const DocumentVersionResponseSchema = Type.Object({
   declaredMimeType: Type.Union([Type.String(), Type.Null()]),
   sizeBytes: Type.String({ pattern: '^[0-9]+$' }),
   sha256: Type.String({ pattern: '^[0-9a-f]{64}$' }),
-  storageKey: Type.String(),
   malwareScanStatus: Type.Union([Type.Literal('PENDING_SCAN'), Type.Literal('CLEAN'), Type.Literal('INFECTED'), Type.Literal('SCAN_FAILED'), Type.Literal('QUARANTINED')]),
   createdBy: Uuid,
   createdAt: DateTime,

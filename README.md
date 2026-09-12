@@ -5,7 +5,7 @@ description/access, and Archivematica digital preservation.
 
 ## Architecture
 
-![ICI Archivos architecture map](docs/architecture/ici-archivos-architecture-map.jpg)
+![ICI Archivos architecture map](architecture_map.png)
 
 ## Status
 

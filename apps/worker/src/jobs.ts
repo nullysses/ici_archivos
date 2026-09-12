@@ -40,16 +40,16 @@ export async function processClaimedMalwareScanJob(dependencies: MalwareScanWork
   if (job.claim_token === null) return;
   const target = await findMalwareScanTarget(dependencies.database, { institutionId: job.institution_id, jobId: job.id, claimToken: job.claim_token, versionId: job.aggregate_id });
   if (target === undefined || target.status !== 'PENDING_SCAN') return;
-  let integrityCompletion: Promise<void> | undefined;
+  let checkedStream: ReturnType<typeof integrityCheckedStream> | undefined;
   let result;
   try {
     const body = await dependencies.storage.open({ zone: 'QUARANTINE', key: target.storageKey });
-    const checked = integrityCheckedStream(body, target.sizeBytes, target.sha256);
-    integrityCompletion = checked.completion;
-    result = await dependencies.scanner.scan(checked.stream);
-    await checked.completion;
+    checkedStream = integrityCheckedStream(body, target.sizeBytes, target.sha256);
+    result = await dependencies.scanner.scan(checkedStream.stream);
+    await checkedStream.completion;
   } catch (error) {
-    await integrityCompletion?.catch(() => undefined);
+    await checkedStream?.cancel(error);
+    await checkedStream?.completion.catch(() => undefined);
     await recordMalwareScanResultAtomically(dependencies.database, { institutionId: job.institution_id, jobId: job.id, claimToken: job.claim_token, versionId: job.aggregate_id, scanId: randomUUID(), result: 'SCAN_FAILED', engine: 'clamd', error: boundedError(error), correlationId: job.correlation_id });
     return;
   }
@@ -86,7 +86,7 @@ class IntegrityMismatchError extends Error {
   }
 }
 
-function integrityCheckedStream(body: ReadableStream<Uint8Array>, expectedSizeBytes: string, expectedSha256: string): { readonly stream: ReadableStream<Uint8Array>; readonly completion: Promise<void> } {
+function integrityCheckedStream(body: ReadableStream<Uint8Array>, expectedSizeBytes: string, expectedSha256: string): { readonly stream: ReadableStream<Uint8Array>; readonly completion: Promise<void>; readonly cancel: (reason: unknown) => Promise<void> } {
   const hash = createHash('sha256');
   let size = 0n;
   let resolveCompletion: (() => void) | undefined;
@@ -114,7 +114,14 @@ function integrityCheckedStream(body: ReadableStream<Uint8Array>, expectedSizeBy
       resolveCompletion?.();
     },
   }));
-  return { stream, completion };
+  return {
+    stream,
+    completion,
+    async cancel(reason: unknown): Promise<void> {
+      rejectCompletion?.(reason);
+      try { await stream.cancel(reason); } catch { /* stream may already be errored or locked by the scanner */ }
+    },
+  };
 }
 
 export function createMalwareScanPollController(run: () => Promise<unknown>, intervalMs: number): MalwareScanPollController {

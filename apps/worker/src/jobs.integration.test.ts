@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
 import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, claimMalwareScanJobs, createDatabase, type Database } from '@ici/database';
@@ -16,15 +16,19 @@ describe('durable malware worker', () => {
   let container: StartedPostgreSqlContainer | undefined;
   let database: Database | undefined;
   const objects = new Map<string, Uint8Array>();
+  let streamFailure: Error | undefined;
   const storage: DocumentStoragePort = {
     async put(input) { const reader = input.body.getReader(); const chunks: Uint8Array[] = []; while (true) { const next = await reader.read(); if (next.done) break; chunks.push(next.value); } const value = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0)); let offset = 0; for (const chunk of chunks) { value.set(chunk, offset); offset += chunk.byteLength; } objects.set(`${input.zone}:${input.key}`, value); },
-    open(input) { const value = objects.get(`${input.zone}:${input.key}`); if (value === undefined) return Promise.reject(new Error('missing object')); return Promise.resolve(new ReadableStream({ start(controller) { controller.enqueue(value); controller.close(); } })); },
+    open(input) { const value = objects.get(`${input.zone}:${input.key}`); if (value === undefined) return Promise.reject(new Error('missing object')); return Promise.resolve(new ReadableStream({ start(controller) { controller.enqueue(value.subarray(0, 2)); if (streamFailure === undefined) { controller.enqueue(value.subarray(2)); controller.close(); } else controller.error(streamFailure); } })); },
     head(input) { const value = objects.get(`${input.zone}:${input.key}`); return Promise.resolve(value === undefined ? undefined : { sizeBytes: BigInt(value.byteLength) }); },
     copy(input) { const value = objects.get(`${input.from}:${input.key}`); if (value === undefined) return Promise.reject(new Error('missing source')); objects.set(`${input.to}:${input.key}`, value); return Promise.resolve(); },
     remove(input) { objects.delete(`${input.zone}:${input.key}`); return Promise.resolve(); },
   };
   let scannerVerdict: 'CLEAN' | 'INFECTED' = 'CLEAN';
-  const scanner: MalwareScannerPort = { async scan(body) { const reader = body.getReader(); while (!(await reader.read()).done) { /* consume the complete stream so integrity checks run */ } return { verdict: scannerVerdict, engine: 'test-clamd', scannedAt: new Date() }; } };
+  let scannerFailure: Error | undefined;
+  const scanner: MalwareScannerPort = { async scan(body) { if (scannerFailure !== undefined) throw scannerFailure; const reader = body.getReader(); while (!(await reader.read()).done) { /* consume the complete stream so integrity checks run */ } return { verdict: scannerVerdict, engine: 'test-clamd', scannedAt: new Date() }; } };
+
+  afterEach(() => { scannerFailure = undefined; streamFailure = undefined; scannerVerdict = 'CLEAN'; });
 
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
@@ -92,5 +96,25 @@ describe('durable malware worker', () => {
     expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('SCAN_FAILED');
     expect((await db().selectFrom('integration_jobs').select('status').where('aggregate_id', '=', versionId).executeTakeFirstOrThrow()).status).toBe('FAILED');
     expect(objects.has(`CLEAN:v1/${institutionId}/${versionId}`)).toBe(false);
+  });
+
+  it('records scan failure when the scanner rejects before consuming the stream', async () => {
+    const versionId = '33000000-0000-4000-8000-000000000019';
+    const documentId = '33000000-0000-4000-8000-000000000020';
+    await createPendingVersion(versionId, documentId);
+    scannerFailure = new Error('clamd connection refused');
+    await expect(runMalwareScanOnce({ database: db(), storage, scanner })).resolves.toBe(1);
+    scannerFailure = undefined;
+    expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('SCAN_FAILED');
+  });
+
+  it('records scan failure when the quarantine stream fails mid-read', async () => {
+    const versionId = '33000000-0000-4000-8000-000000000021';
+    const documentId = '33000000-0000-4000-8000-000000000022';
+    await createPendingVersion(versionId, documentId);
+    streamFailure = new Error('storage stream interrupted');
+    await expect(runMalwareScanOnce({ database: db(), storage, scanner })).resolves.toBe(1);
+    streamFailure = undefined;
+    expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('SCAN_FAILED');
   });
 });

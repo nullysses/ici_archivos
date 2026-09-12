@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, claimMalwareScanJobs, createDatabase, type Database } from '@ici/database';
+import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, assignMatterAtomically, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createDatabase, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
+import type { AuthorizationContext, Capability } from '@ici/database';
 import { runMalwareScanOnce, type MalwareScanWorkerDependencies } from './jobs.js';
 
 const institutionId = '33000000-0000-4000-8000-000000000001';
@@ -116,5 +117,111 @@ describe('durable malware worker', () => {
     await expect(runMalwareScanOnce({ database: db(), storage, scanner })).resolves.toBe(1);
     streamFailure = undefined;
     expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('SCAN_FAILED');
+  });
+
+  it('completes the operational register-to-resolve document pipeline', async () => {
+    const matterId = '33000000-0000-4000-8000-000000000023';
+    const documentId = '33000000-0000-4000-8000-000000000024';
+    const versionId = '33000000-0000-4000-8000-000000000025';
+    const assignmentId = '33000000-0000-4000-8000-000000000026';
+    const bytes = new TextEncoder().encode('%PDF-1.7 complete pipeline\\n');
+    const key = `v1/${institutionId}/${versionId}`;
+    const authorization: AuthorizationContext = {
+      userId,
+      institutionId,
+      institutionCapabilities: new Set<Capability>(['matter.assign', 'matter.start', 'matter.resolve', 'records.read', 'document.version_open']),
+      unitCapabilities: new Map<string, ReadonlySet<Capability>>(),
+    };
+
+    await registerMatterAtomically(db(), {
+      id: matterId,
+      institutionId,
+      receivedAt: new Date('2026-09-10T12:00:00.000Z'),
+      createdBy: userId,
+      actorUserId: userId,
+      intakeMetadata: { sender: 'pipeline', subject: 'pipeline', description: 'pipeline', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'INSTITUTION' },
+      correlationId: `pipeline-${matterId}`,
+      year: 2026,
+      destinationUnitId: unitId,
+      accessClassificationId: classificationId,
+    });
+    await assignMatterAtomically(db(), {
+      institutionId,
+      matterId,
+      assignmentId,
+      unitId,
+      userId,
+      actorUserId: userId,
+      correlationId: `pipeline-assign-${matterId}`,
+      command: 'assignMatter',
+      fromStatus: 'RECEIVED',
+      authorizationContext: authorization,
+    });
+    await persistMatterTransition(db(), {
+      institutionId,
+      aggregateId: matterId,
+      actorUserId: userId,
+      correlationId: `pipeline-start-${matterId}`,
+      command: 'startMatter',
+      fromStatus: 'ASSIGNED',
+      toStatus: 'IN_PROGRESS',
+      authorizationContext: authorization,
+    });
+    await storage.put({ zone: 'QUARANTINE', key, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }), sha256: createHash('sha256').update(bytes).digest('hex') });
+    const accepted = await acceptMatterDocumentUploadAtomically(db(), {
+      documentId,
+      versionId,
+      institutionId,
+      matterId,
+      documentType: 'official',
+      title: 'Complete pipeline evidence',
+      originalFilename: 'evidence.pdf',
+      detectedMimeType: 'application/pdf',
+      declaredMimeType: 'application/pdf',
+      sizeBytes: String(bytes.byteLength),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      storageKey: key,
+      malwareScanStatus: 'PENDING_SCAN',
+      createdBy: userId,
+      correlationId: `pipeline-upload-${matterId}`,
+      authorizationContext: { ...authorization, institutionCapabilities: new Set<Capability>([...authorization.institutionCapabilities, 'matter.register']) },
+    });
+    expect(accepted.version.malware_scan_status).toBe('PENDING_SCAN');
+    expect(accepted.job.job_type).toBe('document.malware_scan');
+    expect(await runMalwareScanOnce({ database: db(), storage, scanner })).toBe(1);
+    expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('CLEAN');
+    expect(objects.has(`CLEAN:${key}`)).toBe(true);
+    expect(objects.has(`QUARANTINE:${key}`)).toBe(false);
+    const authorizedDownload = await authorizeMatterDocumentVersionDownload(db(), { institutionId, versionId, authorizationContext: authorization });
+    expect(authorizedDownload).toMatchObject({ versionId, storageKey: key, detectedMimeType: 'application/pdf', sizeBytes: String(bytes.byteLength) });
+    const downloaded = await storage.open({ zone: 'CLEAN', key });
+    const downloadedReader = downloaded.getReader();
+    const downloadedChunks: Uint8Array[] = [];
+    while (true) {
+      const next = await downloadedReader.read();
+      if (next.done) break;
+      downloadedChunks.push(next.value);
+    }
+    const downloadedBytes = new Uint8Array(downloadedChunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+    let downloadedOffset = 0;
+    for (const chunk of downloadedChunks) {
+      downloadedBytes.set(chunk, downloadedOffset);
+      downloadedOffset += chunk.byteLength;
+    }
+    expect(new TextDecoder().decode(downloadedBytes)).toContain('%PDF-1.7 complete pipeline');
+    await persistMatterTransition(db(), {
+      institutionId,
+      aggregateId: matterId,
+      actorUserId: userId,
+      correlationId: `pipeline-resolve-${matterId}`,
+      command: 'resolveMatter',
+      fromStatus: 'IN_PROGRESS',
+      toStatus: 'RESOLVED',
+      eventData: { resolutionMetadata: { outcome: 'document processed' } },
+      authorizationContext: authorization,
+    });
+    expect((await db().selectFrom('matters').select(['status', 'resolution_metadata']).where('id', '=', matterId).executeTakeFirstOrThrow())).toMatchObject({ status: 'RESOLVED', resolution_metadata: { outcome: 'document processed' } });
+    expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED']);
+    expect((await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', matterId).execute()).map((event) => event.event_type)).toEqual(expect.arrayContaining(['matter.registered', 'matter.assigned', 'matter.started', 'matter.resolved']));
   });
 });

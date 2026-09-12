@@ -18,6 +18,10 @@ const roleCapabilities: Readonly<Record<string, readonly string[]>> = {
   CONSULTA: ['records.read'],
 };
 
+// Development grants must be deterministic and already active at every
+// supported test/reference timestamp; never rely on the database server clock.
+const developmentSeedEffectiveFrom = new Date('2020-01-01T00:00:00.000Z');
+
 /** Deterministic non-authentication seed; it intentionally creates no password or external identity. */
 export async function seedDevelopmentReferenceData(database: Database): Promise<void> {
   await database.insertInto('institutions').values({ id: developmentSeedIds.institution, code: 'TEST', name: 'Test Institution', status: 'ACTIVE' }).onConflict((oc) => oc.column('id').doNothing()).execute();
@@ -28,7 +32,7 @@ export async function seedDevelopmentReferenceData(database: Database): Promise<
   await withTenantTransaction(database, developmentSeedIds.institution, async (tx) => {
     for (const [id, code, name] of [[developmentSeedIds.officialia, 'OFI', 'Oficialía'], [developmentSeedIds.archive, 'ARC', 'Archivo']] as const) await tx.insertInto('organizational_units').values({ id, institution_id: developmentSeedIds.institution, code, name, status: 'ACTIVE' }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
     await tx.insertInto('users').values({ id: developmentSeedIds.adminUser, institution_id: developmentSeedIds.institution, display_name: 'Seed Administrator', status: 'ACTIVE' }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
-    await tx.insertInto('user_role_assignments').values({ id: '30000000-0000-4000-8000-000000000001', institution_id: developmentSeedIds.institution, user_id: developmentSeedIds.adminUser, role_id: '10000000-0000-4000-8000-000000000001' }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
+    await tx.insertInto('user_role_assignments').values({ id: '30000000-0000-4000-8000-000000000001', institution_id: developmentSeedIds.institution, user_id: developmentSeedIds.adminUser, role_id: '10000000-0000-4000-8000-000000000001', effective_from: developmentSeedEffectiveFrom }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
     await tx.insertInto('access_classifications').values({ id: '40000000-0000-4000-8000-000000000001', institution_id: developmentSeedIds.institution, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
     await tx.insertInto('archival_classification_nodes').values({ id: '50000000-0000-4000-8000-000000000001', institution_id: developmentSeedIds.institution, node_type: 'FONDS', code: 'FONDS', name: 'Representative fonds', metadata: {} }).onConflict((oc) => oc.columns(['institution_id', 'id']).doNothing()).execute();
   });

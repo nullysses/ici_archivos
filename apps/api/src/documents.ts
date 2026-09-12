@@ -40,7 +40,7 @@ export interface DocumentApplicationDependencies {
 }
 
 export class DocumentHttpError extends Error {
-  public constructor(readonly statusCode: 400 | 403 | 404 | 409 | 415, readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'DOCUMENT_NOT_FOUND' | 'MATTER_NOT_FOUND' | 'DOCUMENT_NOT_AVAILABLE' | 'UNSUPPORTED_MEDIA_TYPE', message: string) {
+  public constructor(readonly statusCode: 400 | 403 | 404 | 409 | 415, readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'DOCUMENT_NOT_FOUND' | 'MATTER_NOT_FOUND' | 'DOCUMENT_NOT_AVAILABLE' | 'DOCUMENT_STATE_CONFLICT' | 'UNSUPPORTED_MEDIA_TYPE', message: string) {
     super(message);
     this.name = 'DocumentHttpError';
   }
@@ -225,6 +225,7 @@ function mapDocumentError(error: unknown): Error {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new DocumentHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'DOCUMENT_NOT_AVAILABLE') return new DocumentHttpError(409, 'DOCUMENT_NOT_AVAILABLE', 'Document is not available');
+  if (code === 'MATTER_NOT_OPEN' || code === 'ACCESS_CLASSIFICATION_REQUIRED' || code === 'ACCESS_CLASSIFICATION_NOT_FOUND' || code === 'INCONSISTENT_ACCESS_CLASSIFICATION') return new DocumentHttpError(409, 'DOCUMENT_STATE_CONFLICT', 'Matter state changed during document intake');
   if (code === 'DOCUMENT_NOT_FOUND' || (error instanceof Error && error.message === 'Document not found')) return new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
   if (code === 'MATTER_NOT_FOUND' || (error instanceof Error && error.message === 'Matter not found')) return new DocumentHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
   if (code === 'INVALID_DOCUMENT_METADATA' || code === 'REPLACEMENT_REASON_REQUIRED' || code === 'INVALID_SIZE' || code === 'INVALID_SHA256') return new DocumentHttpError(400, 'INVALID_REQUEST', 'Document metadata is invalid');

@@ -24,8 +24,10 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   let currentPrincipal: AuthenticatedPrincipal;
   const objects = new Map<string, Uint8Array>();
+  const objectSha256 = new Map<string, string | undefined>();
+  let terminalizeMatterId: string | undefined;
   const storage: DocumentStoragePort = {
-    async put(input) { const reader = input.body.getReader(); const chunks: Uint8Array[] = []; while (true) { const next = await reader.read(); if (next.done) break; chunks.push(next.value); } const total = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)); let offset = 0; for (const chunk of chunks) { total.set(chunk, offset); offset += chunk.byteLength; } objects.set(`${input.zone}:${input.key}`, total); },
+    async put(input) { const reader = input.body.getReader(); const chunks: Uint8Array[] = []; while (true) { const next = await reader.read(); if (next.done) break; chunks.push(next.value); } const total = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)); let offset = 0; for (const chunk of chunks) { total.set(chunk, offset); offset += chunk.byteLength; } objects.set(`${input.zone}:${input.key}`, total); objectSha256.set(`${input.zone}:${input.key}`, input.sha256); if (terminalizeMatterId !== undefined && database !== undefined) { await database.updateTable('matters').set({ status: 'VOIDED' }).where('id', '=', terminalizeMatterId).execute(); } },
     open(input) { const value = objects.get(`${input.zone}:${input.key}`); if (value === undefined) return Promise.reject(new Error('missing object')); return Promise.resolve(new ReadableStream({ start(controller) { controller.enqueue(value); controller.close(); } })); },
     head(input) { const value = objects.get(`${input.zone}:${input.key}`); return Promise.resolve(value === undefined ? undefined : { sizeBytes: BigInt(value.byteLength) }); },
     copy() { return Promise.reject(new Error('not used')); },
@@ -65,7 +67,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
       checkDatabase: () => Promise.resolve(true),
       version: 'test',
       webOrigin: 'http://localhost',
-      documentDependencies: { database, storage },
+      documentDependencies: { database, storage, maxBytes: 64n },
     });
   }, 120_000);
 
@@ -139,9 +141,29 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     const uploadedBody = uploaded.json<{ document: { id: string }; version: { malwareScanStatus: string; detectedMimeType: string } }>();
     expect(uploadedBody.version).toMatchObject({ malwareScanStatus: 'PENDING_SCAN', detectedMimeType: 'application/pdf' });
     expect(objects.size).toBe(1);
+    expect([...objectSha256.values()][0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(uploadedBody.version).not.toHaveProperty('storageKey');
     const listed = await api().inject({ method: 'GET', url: `/matters/${matterId}/documents`, headers: { authorization: 'Bearer test' } });
     expect(listed.statusCode).toBe(200);
     expect(listed.json<{ items: unknown[] }>().items).toHaveLength(1);
+
+    const oversizedMatter = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2041-09-11T12:00:00.000Z' } });
+    const oversizedBoundary = 'ici-oversized-boundary';
+    const oversizedBody = Buffer.from(`--${oversizedBoundary}\r\nContent-Disposition: form-data; name="documentType"\r\n\r\nofficial\r\n--${oversizedBoundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nToo large\r\n--${oversizedBoundary}\r\nContent-Disposition: form-data; name="file"; filename="large.txt"\r\nContent-Type: text/plain\r\n\r\n${'x'.repeat(65)}\r\n--${oversizedBoundary}--\r\n`);
+    const oversized = await api().inject({ method: 'POST', url: `/matters/${oversizedMatter.json<{ id: string }>().id}/documents`, headers: { authorization: 'Bearer test', 'content-type': `multipart/form-data; boundary=${oversizedBoundary}` }, payload: oversizedBody });
+    expect(oversized.statusCode).toBe(400);
+    expect(objects.size).toBe(1);
+
+    const raceMatter = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2042-09-11T12:00:00.000Z' } });
+    const raceMatterId = raceMatter.json<{ id: string }>().id;
+    terminalizeMatterId = raceMatterId;
+    const raceBoundary = 'ici-race-boundary';
+    const raceBody = Buffer.from(`--${raceBoundary}\r\nContent-Disposition: form-data; name="documentType"\r\n\r\nofficial\r\n--${raceBoundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nRace\r\n--${raceBoundary}\r\nContent-Disposition: form-data; name="file"; filename="race.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7 race\r\n--${raceBoundary}--\r\n`);
+    const race = await api().inject({ method: 'POST', url: `/matters/${raceMatterId}/documents`, headers: { authorization: 'Bearer test', 'content-type': `multipart/form-data; boundary=${raceBoundary}` }, payload: raceBody });
+    terminalizeMatterId = undefined;
+    expect(race.statusCode).toBe(409);
+    expect(objects.size).toBe(1);
+    expect(await db().selectFrom('documents').select('id').where('matter_id', '=', raceMatterId).execute()).toHaveLength(0);
   });
 
   it('rolls back matter, folio, state event, and audit on transactional failure', async () => {

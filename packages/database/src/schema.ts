@@ -330,6 +330,8 @@ export interface IntegrationJobsTable {
   correlation_id: string;
   attempt_count: number;
   next_attempt_at: Nullable<Date>;
+  lease_expires_at: Nullable<Date>;
+  claim_token: Nullable<string>;
   last_error: Nullable<string>;
   payload: JsonColumn;
   created_at: Timestamp;

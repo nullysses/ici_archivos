@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, createDatabase, type Database } from '@ici/database';
+import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, claimMalwareScanJobs, createDatabase, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import { runMalwareScanOnce, type MalwareScanWorkerDependencies } from './jobs.js';
@@ -23,7 +24,7 @@ describe('durable malware worker', () => {
     remove(input) { objects.delete(`${input.zone}:${input.key}`); return Promise.resolve(); },
   };
   let scannerVerdict: 'CLEAN' | 'INFECTED' = 'CLEAN';
-  const scanner: MalwareScannerPort = { scan() { return Promise.resolve({ verdict: scannerVerdict, engine: 'test-clamd', scannedAt: new Date() }); } };
+  const scanner: MalwareScannerPort = { async scan(body) { const reader = body.getReader(); while (!(await reader.read()).done) { /* consume the complete stream so integrity checks run */ } return { verdict: scannerVerdict, engine: 'test-clamd', scannedAt: new Date() }; } };
 
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
@@ -41,8 +42,9 @@ describe('durable malware worker', () => {
     const key = `v1/${institutionId}/${versionId}`;
     const matterId = `33000000-0000-4000-8000-${versionId.slice(-12)}`;
     await db().insertInto('matters').values({ id: matterId, institution_id: institutionId, folio: `OP-2045-${versionId.slice(-6)}`, folio_year: 2045, sequence_number: Number.parseInt(versionId.slice(-6), 10) || 1, status: 'RECEIVED', received_at: new Date(), intake_metadata: { operationalVisibility: 'INSTITUTION' }, destination_unit_id: unitId, access_classification_id: classificationId, created_by: userId }).execute();
-    const accepted = await acceptMatterDocumentUploadAtomically(db(), { documentId, versionId, institutionId, matterId, documentType: 'official', title: 'Worker test', originalFilename: 'test.pdf', detectedMimeType: 'application/pdf', sizeBytes: '4', sha256: 'a'.repeat(64), storageKey: key, malwareScanStatus: 'PENDING_SCAN', createdBy: userId, correlationId: `worker-${versionId}`, authorizationContext: { userId, institutionId, institutionCapabilities: new Set(['records.read', 'document.version_open']), unitCapabilities: new Map() } });
-    objects.set(`QUARANTINE:${key}`, new Uint8Array([1, 2, 3, 4]));
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const accepted = await acceptMatterDocumentUploadAtomically(db(), { documentId, versionId, institutionId, matterId, documentType: 'official', title: 'Worker test', originalFilename: 'test.pdf', detectedMimeType: 'application/pdf', sizeBytes: String(bytes.byteLength), sha256: createHash('sha256').update(bytes).digest('hex'), storageKey: key, malwareScanStatus: 'PENDING_SCAN', createdBy: userId, correlationId: `worker-${versionId}`, authorizationContext: { userId, institutionId, institutionCapabilities: new Set(['records.read', 'document.version_open']), unitCapabilities: new Map() } });
+    objects.set(`QUARANTINE:${key}`, bytes);
     return accepted.job.id;
   }
 
@@ -67,5 +69,28 @@ describe('durable malware worker', () => {
     await runMalwareScanOnce({ database: db(), storage, scanner });
     expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('QUARANTINED');
     expect(objects.has(`QUARANTINE:v1/${institutionId}/${versionId}`)).toBe(true);
+  });
+
+  it('reclaims a stale running job with a fresh claim', async () => {
+    const versionId = '33000000-0000-4000-8000-000000000015';
+    const documentId = '33000000-0000-4000-8000-000000000016';
+    const jobId = await createPendingVersion(versionId, documentId);
+    const firstClaim = await claimMalwareScanJobs(db(), institutionId, 1, new Date('2045-01-01T00:00:00Z'), 1);
+    expect(firstClaim.find((job) => job.id === jobId)?.status).toBe('RUNNING');
+    scannerVerdict = 'CLEAN';
+    expect(await runMalwareScanOnce({ database: db(), storage, scanner }, 10, new Date('2045-01-01T00:00:02Z'), 1)).toBe(1);
+    expect(await db().selectFrom('integration_jobs').select(['status', 'attempt_count']).where('id', '=', jobId).executeTakeFirstOrThrow()).toMatchObject({ status: 'SUCCEEDED', attempt_count: 2 });
+  });
+
+  it('fails closed when scanned bytes do not match the authoritative hash', async () => {
+    const versionId = '33000000-0000-4000-8000-000000000017';
+    const documentId = '33000000-0000-4000-8000-000000000018';
+    await createPendingVersion(versionId, documentId);
+    objects.set(`QUARANTINE:v1/${institutionId}/${versionId}`, new Uint8Array([9, 9, 9, 9]));
+    scannerVerdict = 'CLEAN';
+    await runMalwareScanOnce({ database: db(), storage, scanner });
+    expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('SCAN_FAILED');
+    expect((await db().selectFrom('integration_jobs').select('status').where('aggregate_id', '=', versionId).executeTakeFirstOrThrow()).status).toBe('FAILED');
+    expect(objects.has(`CLEAN:v1/${institutionId}/${versionId}`)).toBe(false);
   });
 });

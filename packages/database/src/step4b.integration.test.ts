@@ -179,7 +179,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     const claimed = await claimMalwareScanJobs(app(), institutionA, 1, fixedNow);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]?.attempt_count).toBe(1);
-    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed[0]?.id ?? '', versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-000000000016', result: 'CLEAN', engine: 'clamd', scannedAt: fixedNow, correlationId: 'matter-document-scan' });
+    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed[0]?.id ?? '', claimToken: claimed[0]?.claim_token ?? '', versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-000000000016', result: 'CLEAN', engine: 'clamd', scannedAt: fixedNow, correlationId: 'matter-document-scan' });
     const download = await authorizeMatterDocumentDownload(app(), { institutionId: institutionA, documentId: matterDocumentA, versionId: matterDocumentVersionA, authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
     expect(download.sha256).toBe('c'.repeat(64));
     expect(download.sizeBytes).toBe('12');
@@ -207,7 +207,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     await acceptMatterDocumentUploadAtomically(app(), { institutionId: institutionA, matterId: matterA, documentId: document, versionId: version, documentType: 'record', title: 'Retry document', originalFilename: 'retry.pdf', detectedMimeType: 'application/pdf', sizeBytes: 4, sha256: 'd'.repeat(64), storageKey: 'v1/retry-document', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'retry-accept', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
     const claimed = (await claimMalwareScanJobs(app(), institutionA, 10, fixedNow)).find((job) => job.aggregate_id === version);
     expect(claimed).toBeDefined();
-    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed?.id ?? '', versionId: version, scanId: '90000000-0000-4000-8000-000000000019', result: 'SCAN_FAILED', engine: 'clamd', error: 'daemon unavailable', scannedAt: fixedNow, correlationId: 'retry-failed' });
+    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed?.id ?? '', claimToken: claimed?.claim_token ?? '', versionId: version, scanId: '90000000-0000-4000-8000-000000000019', result: 'SCAN_FAILED', engine: 'clamd', error: 'daemon unavailable', scannedAt: fixedNow, correlationId: 'retry-failed' });
     await prepareMalwareRetryAtomically(app(), { institutionId: institutionA, jobId: claimed?.id ?? '', versionId: version, nextAttemptAt: new Date(fixedNow.getTime() + 60_000), correlationId: 'retry-scheduled' });
     const retry = (await claimMalwareScanJobs(app(), institutionA, 10, new Date(fixedNow.getTime() + 60_001))).find((job) => job.aggregate_id === version);
     expect(retry?.attempt_count).toBe(2);
@@ -219,7 +219,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       await tx.insertInto('integration_jobs').values({ id: unrelatedJob, institution_id: institutionA, job_type: 'atom.sync', aggregate_type: 'document_version', aggregate_id: matterDocumentVersionA, status: 'PENDING', idempotency_key: 'unrelated-document-job', correlation_id: 'unrelated-document-job', attempt_count: 0, payload: {} }).execute();
       await tx.updateTable('integration_jobs').set({ status: 'RUNNING', attempt_count: 1 }).where('id', '=', unrelatedJob).execute();
     });
-    await expect(recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: unrelatedJob, versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-00000000001c', result: 'CLEAN', engine: 'clamd', correlationId: 'unrelated-document-job' })).rejects.toThrow(/malware scan job/i);
+      await expect(recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: unrelatedJob, claimToken: 'not-the-claim', versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-00000000001c', result: 'CLEAN', engine: 'clamd', correlationId: 'unrelated-document-job' })).rejects.toThrow(/malware scan job/i);
 
     const mismatchClassification = '90000000-0000-4000-8000-00000000001d';
     const mismatchMatter = '90000000-0000-4000-8000-00000000001e';

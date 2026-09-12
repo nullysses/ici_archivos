@@ -33,6 +33,7 @@ export interface WorkerConfig {
   readonly s3CleanBucket?: string | undefined;
   readonly s3ForcePathStyle?: boolean | undefined;
   readonly malwarePollIntervalMs?: number | undefined;
+  readonly malwareLeaseSeconds?: number | undefined;
 }
 
 export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): ApiConfig {
@@ -100,7 +101,7 @@ export function readWorkerConfig(environment: NodeJS.ProcessEnv = process.env): 
   return {
     redisUrl: environment.REDIS_URL ?? 'redis://127.0.0.1:6379', databaseUrl, clamavHost,
     clamavPort: readOptionalPort(environment.CLAMAV_PORT, 3310), clamavConnectTimeoutMs: readOptionalPositive(environment.CLAMAV_CONNECT_TIMEOUT_MS, 5000), clamavReadTimeoutMs: readOptionalPositive(environment.CLAMAV_READ_TIMEOUT_MS, 30000),
-    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000),
+    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000), malwareLeaseSeconds: readOptionalPositive(environment.MALWARE_LEASE_SECONDS, 300),
   };
 }
 

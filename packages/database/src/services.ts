@@ -787,11 +787,11 @@ export async function authorizeMatterDocumentVersionDownload(database: Database,
   return authorizeMatterDocumentDownload(database, { institutionId: input.institutionId, documentId, versionId: input.versionId, authorizationContext: input.authorizationContext });
 }
 
-export async function recordMalwareScanResultAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly versionId: string; readonly scanId: string; readonly result: 'CLEAN' | 'INFECTED' | 'SCAN_FAILED'; readonly engine: string; readonly engineVersion?: string; readonly signatureVersion?: string; readonly scannedAt?: Date; readonly error?: string; readonly correlationId: string; }): Promise<void> {
+export async function recordMalwareScanResultAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly claimToken: string; readonly versionId: string; readonly scanId: string; readonly result: 'CLEAN' | 'INFECTED' | 'SCAN_FAILED'; readonly engine: string; readonly engineVersion?: string; readonly signatureVersion?: string; readonly scannedAt?: Date; readonly error?: string; readonly correlationId: string; }): Promise<void> {
   if (input.result === 'SCAN_FAILED' && (input.error === undefined || input.error.length > 4000)) throw new DomainInvariantError('INVALID_JOB_ERROR', 'Scan failure errors are limited to 4000 characters');
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
-    const job = await transaction.selectFrom('integration_jobs').select(['status', 'aggregate_id', 'job_type', 'aggregate_type']).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).forUpdate().executeTakeFirst();
-    if (job?.status !== 'RUNNING' || job.aggregate_id !== input.versionId || job.job_type !== 'document.malware_scan' || job.aggregate_type !== 'document_version') throw new DomainInvariantError('INVALID_JOB_STATE', 'Malware scan job is not running for this version');
+    const job = await transaction.selectFrom('integration_jobs').select(['status', 'aggregate_id', 'job_type', 'aggregate_type', 'claim_token']).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).forUpdate().executeTakeFirst();
+    if (job?.status !== 'RUNNING' || job.claim_token !== input.claimToken || job.aggregate_id !== input.versionId || job.job_type !== 'document.malware_scan' || job.aggregate_type !== 'document_version') throw new DomainInvariantError('INVALID_JOB_STATE', 'Malware scan job is not running for this version and claim');
     const version = await transaction.selectFrom('document_versions').select('malware_scan_status').where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();
     if (version?.malware_scan_status !== 'PENDING_SCAN') throw new DomainInvariantError('INVALID_SCAN_STATE', 'Document version is not pending malware scan');
     const scannedAt = input.scannedAt ?? await databaseTimestamp(transaction, 'Malware scan');
@@ -802,7 +802,7 @@ export async function recordMalwareScanResultAtomically(database: Database, inpu
     } else {
       await transaction.updateTable('document_versions').set({ malware_scan_status: input.result }).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).execute();
     }
-    await transaction.updateTable('integration_jobs').set(input.result === 'SCAN_FAILED' ? { status: 'FAILED', last_error: input.error ?? 'Malware scan failed', updated_at: scannedAt } : { status: 'SUCCEEDED', updated_at: scannedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).where('status', '=', 'RUNNING').executeTakeFirstOrThrow();
+    await transaction.updateTable('integration_jobs').set(input.result === 'SCAN_FAILED' ? { status: 'FAILED', last_error: input.error ?? 'Malware scan failed', lease_expires_at: null, claim_token: null, updated_at: scannedAt } : { status: 'SUCCEEDED', lease_expires_at: null, claim_token: null, updated_at: scannedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).where('status', '=', 'RUNNING').where('claim_token', '=', input.claimToken).executeTakeFirstOrThrow();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: input.result === 'CLEAN' ? 'document.malware_clean' : input.result === 'INFECTED' ? 'document.malware_infected' : 'document.malware_scan_failed', aggregateType: 'document_version', aggregateId: input.versionId, correlationId: input.correlationId, eventData: { result: input.result, scanId: input.scanId } });
   });
 }
@@ -813,28 +813,33 @@ export async function prepareMalwareRetryAtomically(database: Database, input: {
     const version = await transaction.selectFrom('document_versions').select('malware_scan_status').where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();
     if (job?.status !== 'FAILED' || job.aggregate_id !== input.versionId || job.job_type !== 'document.malware_scan' || job.aggregate_type !== 'document_version' || version?.malware_scan_status !== 'SCAN_FAILED') throw new DomainInvariantError('INVALID_SCAN_STATE', 'Only a failed malware scan may be retried');
     await transaction.updateTable('document_versions').set({ malware_scan_status: 'PENDING_SCAN' }).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).execute();
-    await transaction.updateTable('integration_jobs').set({ status: 'PENDING', next_attempt_at: input.nextAttemptAt, updated_at: await databaseTimestamp(transaction, 'Retry') }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).execute();
+    await transaction.updateTable('integration_jobs').set({ status: 'PENDING', next_attempt_at: input.nextAttemptAt, lease_expires_at: null, claim_token: null, updated_at: await databaseTimestamp(transaction, 'Retry') }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'document.malware_scan_retry_scheduled', aggregateType: 'document_version', aggregateId: input.versionId, correlationId: input.correlationId, eventData: { jobId: input.jobId, nextAttemptAt: input.nextAttemptAt.toISOString() } });
   });
 }
 
-export async function claimMalwareScanJobs(database: Database, institutionId: InstitutionId | string, limit: number, now: Date = new Date()): Promise<readonly Selectable<IntegrationJobsTable>[]> {
+export async function claimMalwareScanJobs(database: Database, institutionId: InstitutionId | string, limit: number, now: Date = new Date(), leaseSeconds = 300): Promise<readonly Selectable<IntegrationJobsTable>[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainInvariantError('INVALID_JOB_BATCH', 'Job claim limit must be between 1 and 100');
+  if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 86_400) throw new DomainInvariantError('INVALID_JOB_LEASE', 'Job lease must be between 1 and 86400 seconds');
+  const leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
   return withTenantTransaction(database, institutionId, async (transaction) => {
     const result = await sql<Selectable<IntegrationJobsTable>>`
       WITH due AS (
         SELECT id FROM integration_jobs
         WHERE institution_id = ${institutionId}
           AND job_type = 'document.malware_scan'
-          AND status = 'PENDING'
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ${now})
+          AND ((status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= ${now}))
+            OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ${now}))
         ORDER BY created_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT ${limit}
       )
       UPDATE integration_jobs AS jobs
       SET status = 'RUNNING', attempt_count = jobs.attempt_count + 1,
-          next_attempt_at = NULL, updated_at = clock_timestamp()
+          next_attempt_at = NULL,
+          lease_expires_at = ${leaseExpiresAt},
+          claim_token = md5(random()::text || clock_timestamp()::text || jobs.id::text),
+          updated_at = clock_timestamp()
       FROM due
       WHERE jobs.id = due.id AND jobs.institution_id = ${institutionId}
       RETURNING jobs.*
@@ -846,12 +851,14 @@ export async function claimMalwareScanJobs(database: Database, institutionId: In
 export interface MalwareScanTarget {
   readonly storageKey: string;
   readonly status: DocumentVersionsTable['malware_scan_status'];
+  readonly sha256: string;
+  readonly sizeBytes: string;
 }
 
 /** Loads the authoritative scan target after a job has been claimed. Payloads are hints only. */
-export async function findMalwareScanTarget(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly versionId: string }): Promise<MalwareScanTarget | undefined> {
+export async function findMalwareScanTarget(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly claimToken: string; readonly versionId: string }): Promise<MalwareScanTarget | undefined> {
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
-    const row = await transaction.selectFrom('integration_jobs as j').innerJoin('document_versions as v', (join) => join.onRef('v.id', '=', 'j.aggregate_id').onRef('v.institution_id', '=', 'j.institution_id')).select(['v.storage_key as storageKey', 'v.malware_scan_status as status']).where('j.institution_id', '=', input.institutionId).where('j.id', '=', input.jobId).where('j.job_type', '=', 'document.malware_scan').where('j.aggregate_type', '=', 'document_version').where('j.aggregate_id', '=', input.versionId).executeTakeFirst();
+    const row = await transaction.selectFrom('integration_jobs as j').innerJoin('document_versions as v', (join) => join.onRef('v.id', '=', 'j.aggregate_id').onRef('v.institution_id', '=', 'j.institution_id')).select(['v.storage_key as storageKey', 'v.malware_scan_status as status', 'v.sha256', 'v.size_bytes as sizeBytes']).where('j.institution_id', '=', input.institutionId).where('j.id', '=', input.jobId).where('j.claim_token', '=', input.claimToken).where('j.status', '=', 'RUNNING').where('j.job_type', '=', 'document.malware_scan').where('j.aggregate_type', '=', 'document_version').where('j.aggregate_id', '=', input.versionId).executeTakeFirst();
     return row;
   });
 }

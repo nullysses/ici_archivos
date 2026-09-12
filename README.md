@@ -3,6 +3,10 @@
 Government records workflow coordinating operational records, AtoM archival
 description/access, and Archivematica digital preservation.
 
+## Architecture
+
+![ICI Archivos architecture map](docs/architecture/ici-archivos-architecture-map.jpg)
+
 ## Prerequisites
 
 - Node.js 22.12 or newer

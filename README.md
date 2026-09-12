@@ -19,7 +19,7 @@ Docker Compose. Full register-to-resolve integration coverage is in place.
 
 Next: **Step 6 — Expedientes and archival transfer.**
 
-![ICI Archivos implementation status — Step 5 complete](docs/status/ici-archivos-status-step-5-complete.jpg)
+![ICI Archivos implementation status — Step 5 complete](status.png)
 
 ## Prerequisites
 

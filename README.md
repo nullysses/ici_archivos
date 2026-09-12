@@ -36,14 +36,14 @@ pnpm test:e2e
 `pnpm check` runs lint, typecheck, unit tests, and builds. Integration tests need
 a running Docker daemon but do not use the local Compose database.
 
-The Compose stack also starts a pinned ClamAV daemon on the private Compose
-network and an idempotent MinIO bootstrap job. The bootstrap creates the
-private `S3_QUARANTINE_BUCKET` and `S3_CLEAN_BUCKET` buckets and a restricted
-application user; it never publishes clamd's TCP port. When the worker runs as
-a Compose-network process, use `CLAMAV_HOST=clamav` and the S3 variables from
-`infra/compose/.env`. Host-run development processes can still use MinIO via
-`S3_ENDPOINT=http://127.0.0.1:9000`; clamd remains intentionally unreachable
-from the host.
+The Compose stack also runs the pinned database migration job, a worker, a
+pinned ClamAV daemon on the private Compose network, and an idempotent MinIO
+bootstrap job. The bootstrap creates the private
+`S3_QUARANTINE_BUCKET`/`S3_CLEAN_BUCKET` buckets and a restricted application
+user; it never publishes clamd's TCP port. `pnpm dev` starts only the host API
+and web processes; it loads `infra/compose/.env` so the API can use MinIO at
+`http://127.0.0.1:9000`. The malware worker remains in Compose, where
+`CLAMAV_HOST=clamav` and `S3_ENDPOINT=http://minio:9000` are reachable.
 
 ## Workspace
 

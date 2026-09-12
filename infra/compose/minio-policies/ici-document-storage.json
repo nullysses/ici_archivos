@@ -11,11 +11,13 @@
     },
     {
       "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+      "Resource": "arn:aws:s3:::__QUARANTINE_BUCKET__/*"
+    },
+    {
+      "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": [
-        "arn:aws:s3:::__QUARANTINE_BUCKET__/*",
-        "arn:aws:s3:::__CLEAN_BUCKET__/*"
-      ]
+      "Resource": "arn:aws:s3:::__CLEAN_BUCKET__/*"
     }
   ]
 }

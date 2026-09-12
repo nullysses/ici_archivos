@@ -35,7 +35,7 @@ services:
       - redis_data:/data
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in infra/compose/.env}
@@ -52,7 +52,7 @@ services:
       - minio_data:/data
 
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       minio:
         condition: service_healthy
@@ -64,19 +64,8 @@ services:
       S3_QUARANTINE_BUCKET: ${S3_QUARANTINE_BUCKET:?Set S3_QUARANTINE_BUCKET in infra/compose/.env}
       S3_CLEAN_BUCKET: ${S3_CLEAN_BUCKET:?Set S3_CLEAN_BUCKET in infra/compose/.env}
     volumes:
-      - ./minio-policies:/policies:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
-        mc mb --ignore-existing "local/$${S3_QUARANTINE_BUCKET}" &&
-        mc mb --ignore-existing "local/$${S3_CLEAN_BUCKET}" &&
-        mc anonymous set none "local/$${S3_QUARANTINE_BUCKET}" &&
-        mc anonymous set none "local/$${S3_CLEAN_BUCKET}" &&
-        (mc admin user add local "$${S3_ACCESS_KEY_ID}" "$${S3_SECRET_ACCESS_KEY}" || true) &&
-        sed -e "s/__QUARANTINE_BUCKET__/$${S3_QUARANTINE_BUCKET}/g" -e "s/__CLEAN_BUCKET__/$${S3_CLEAN_BUCKET}/g" /policies/ici-document-storage.json > /tmp/ici-document-storage.json &&
-        (mc admin policy create local ici-document-storage /tmp/ici-document-storage.json || true) &&
-        mc admin policy attach local ici-document-storage --user "$${S3_ACCESS_KEY_ID}"
+      - ./minio-policies:/scripts:ro
+    entrypoint: [/bin/sh, /scripts/minio-init.sh]
 
   clamav:
     image: clamav/clamav:1.4.3
@@ -87,6 +76,49 @@ services:
       timeout: 10s
       retries: 30
       start_period: 30s
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/compose/worker.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    command: [node, infra/compose/migrate.mjs]
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/compose/worker.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://${ICI_APP_DB_USER}:${ICI_APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      CLAMAV_CONNECT_TIMEOUT_MS: ${CLAMAV_CONNECT_TIMEOUT_MS:-5000}
+      CLAMAV_READ_TIMEOUT_MS: ${CLAMAV_READ_TIMEOUT_MS:-30000}
+      MALWARE_POLL_INTERVAL_MS: ${MALWARE_POLL_INTERVAL_MS:-1000}
+      MALWARE_LEASE_SECONDS: ${MALWARE_LEASE_SECONDS:-300}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID in infra/compose/.env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY in infra/compose/.env}
+      S3_QUARANTINE_BUCKET: ${S3_QUARANTINE_BUCKET:?Set S3_QUARANTINE_BUCKET in infra/compose/.env}
+      S3_CLEAN_BUCKET: ${S3_CLEAN_BUCKET:?Set S3_CLEAN_BUCKET in infra/compose/.env}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
 
 volumes:
   minio_data:

@@ -7,11 +7,28 @@ description/access, and Archivematica digital preservation.
 
 ![ICI Archivos architecture map](docs/architecture/ici-archivos-architecture-map.jpg)
 
+## Status
+
+**Step 5 — Matter workflow and document pipeline: complete and frozen.**
+
+The implemented path covers matter registration, assignment, workflow transitions,
+document intake and versioning, quarantine, durable malware scanning, CLEAN
+promotion and protected download. The local development stack includes PostgreSQL,
+MinIO and private-network ClamAV with the worker and migration jobs running in
+Docker Compose. Full register-to-resolve integration coverage is in place.
+
+Next: **Step 6 — Expedientes and archival transfer.**
+
+![ICI Archivos implementation status — Step 5 complete](docs/status/ici-archivos-status-step-5-complete.jpg)
+
 ## Prerequisites
 
 - Node.js 22.12 or newer
 - pnpm 11.1.3
 - Docker Engine with Docker Compose for local dependencies
+
+Development is supported on WSL2/Linux. Native Windows shells are not a supported
+development environment.
 
 ## First run
 
@@ -80,10 +97,11 @@ assignment, `matters.destination_unit_id` remains the relevant unit. Matter
 reads, inbox visibility, and subsequent workflow authorization should converge
 on this rule.
 
-One Step 5 policy decision remains to be clarified before the assignment model
-is considered frozen: assigning a specific user currently requires that the
-user be active and belong to the same institution, but does not prove an
-explicit association with the selected assignment unit. Decide whether a target
-user must have explicit membership/authorization in that unit (and which
-existing relation is authoritative for that proof), or whether assignment to
-any active user in the institution is intentionally permitted.
+A policy decision is intentionally deferred before Step 6: assigning a specific
+user currently requires that the user be active and belong to the same
+institution, but does not prove an explicit association with the selected
+assignment unit. Decide whether a target user must have explicit
+membership/authorization in that unit (and which existing relation is
+authoritative for that proof), or whether assignment to any active user in the
+institution is intentionally permitted. This does not reopen the completed Step
+5 implementation tranche.

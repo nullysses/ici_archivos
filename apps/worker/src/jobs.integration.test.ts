@@ -39,6 +39,8 @@ describe('durable malware worker', () => {
     await database.insertInto('institutions').values({ id: institutionId, code: 'WORKER', name: 'Worker test', status: 'ACTIVE' }).execute();
     await database.insertInto('users').values({ id: userId, institution_id: institutionId, display_name: 'Worker user', status: 'ACTIVE' }).execute();
     await database.insertInto('organizational_units').values({ id: unitId, institution_id: institutionId, code: 'WORKER-UNIT', name: 'Worker unit', status: 'ACTIVE' }).execute();
+    await database.insertInto('roles').values({ id: '33000000-0000-4000-8000-000000000005', code: 'WORKER_ROLE', name: 'Worker role' }).execute();
+    await database.insertInto('user_role_assignments').values({ id: '33000000-0000-4000-8000-000000000006', institution_id: institutionId, user_id: userId, role_id: '33000000-0000-4000-8000-000000000005', unit_id: unitId, effective_from: new Date('2020-01-01T00:00:00.000Z') }).execute();
     await database.insertInto('access_classifications').values({ id: classificationId, institution_id: institutionId, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
   }, 120_000);
   afterAll(async () => { await database?.destroy(); await container?.stop(); });

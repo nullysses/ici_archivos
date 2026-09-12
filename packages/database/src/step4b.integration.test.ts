@@ -352,7 +352,11 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
         { id: actor, institution_id: institutionA, display_name: 'Actor', status: 'ACTIVE' },
         { id: otherUser, institution_id: institutionA, display_name: 'Other', status: 'ACTIVE' },
       ]).execute();
-      await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000125', institution_id: institutionA, user_id: actor, role_id: gestorRole, unit_id: authorizedUnit, effective_from: fixedNow }).execute();
+      await tx.insertInto('user_role_assignments').values([
+        { id: '90000000-0000-4000-8000-000000000125', institution_id: institutionA, user_id: actor, role_id: gestorRole, unit_id: authorizedUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000128', institution_id: institutionA, user_id: actor, role_id: gestorRole, unit_id: directOnlyUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000129', institution_id: institutionA, user_id: otherUser, role_id: gestorRole, unit_id: authorizedUnit, effective_from: fixedNow },
+      ]).execute();
       return resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
     });
     await registerMatterAtomically(app(), { id: directMatter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'direct' }, correlationId: 'fixture-direct', actorUserId: actor, year: 2026 });
@@ -389,6 +393,7 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       await tx.insertInto('user_role_assignments').values([
         { id: '90000000-0000-4000-8000-000000000134', institution_id: institutionA, user_id: actor, role_id: officialiaRole, unit_id: assignedUnit, effective_from: fixedNow },
         { id: '90000000-0000-4000-8000-000000000137', institution_id: institutionA, user_id: actor, role_id: gestorRole, unit_id: startUnit, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000138', institution_id: institutionA, user_id: assignee, role_id: officialiaRole, unit_id: assignedUnit, effective_from: fixedNow },
       ]).execute();
       const context = await resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
       expect(canPerform(context, 'matter.assign', assignedUnit)).toBe(true);
@@ -421,7 +426,10 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
         { id: actor, institution_id: institutionA, display_name: 'Institution-wide actor', status: 'ACTIVE' },
         { id: assignee, institution_id: institutionA, display_name: 'Institution-wide assignee', status: 'ACTIVE' },
       ]).execute();
-      await tx.insertInto('user_role_assignments').values({ id: '90000000-0000-4000-8000-000000000145', institution_id: institutionA, user_id: actor, role_id: gestorRole, effective_from: fixedNow }).execute();
+      await tx.insertInto('user_role_assignments').values([
+        { id: '90000000-0000-4000-8000-000000000145', institution_id: institutionA, user_id: actor, role_id: gestorRole, effective_from: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000147', institution_id: institutionA, user_id: assignee, role_id: gestorRole, unit_id: assignedUnit, effective_from: fixedNow },
+      ]).execute();
       return resolveAuthorizationContext(tx, institutionA, actor, new Date('2026-09-10T00:00:00.000Z'));
     });
     await registerMatterAtomically(app(), { id: matter, institutionId: institutionA, receivedAt: fixedNow, intakeMetadata: { subject: 'institution-wide start' }, correlationId: 'fixture-institution-start', actorUserId: actor, year: 2026 });
@@ -625,5 +633,33 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       expect(versions.map((row) => row.version_number).sort()).toEqual([1, 2, 3]);
       expect((await tenantRepositories(tx, institutionA).documents.byId(document))?.current_version_id).toBe(versions[0]?.id);
     });
+  });
+
+  it('requires closeMatter to use an existing expediente link and never accepts a caller substitute', async () => {
+    const linkedMatter = '90000000-0000-4000-8000-000000000080';
+    const unlinkedMatter = '90000000-0000-4000-8000-000000000081';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('matters').values([
+        { id: linkedMatter, institution_id: institutionA, folio: 'OP-2026-000704', folio_year: 2026, sequence_number: 704, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'linked', operationalVisibility: 'INSTITUTION' }, linked_expediente_id: expedienteA },
+        { id: unlinkedMatter, institution_id: institutionA, folio: 'OP-2026-000705', folio_year: 2026, sequence_number: 705, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'unlinked', operationalVisibility: 'INSTITUTION' } },
+      ]).execute();
+      await tx.insertInto('matter_assignments').values([
+        { id: '90000000-0000-4000-8000-000000000082', institution_id: institutionA, matter_id: linkedMatter, unit_id: developmentSeedIds.officialia, user_id: developmentSeedIds.adminUser, assigned_at: fixedNow },
+        { id: '90000000-0000-4000-8000-000000000083', institution_id: institutionA, matter_id: unlinkedMatter, unit_id: developmentSeedIds.officialia, user_id: developmentSeedIds.adminUser, assigned_at: fixedNow },
+      ]).execute();
+      await tx.updateTable('matters').set({ status: 'ASSIGNED' }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
+      await tx.updateTable('matters').set({ status: 'IN_PROGRESS' }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
+      await tx.updateTable('matters').set({ resolution_metadata: { outcome: 'resolved' } }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
+      await tx.updateTable('matters').set({ status: 'RESOLVED' }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
+    });
+    await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: linkedMatter, actorUserId: developmentSeedIds.adminUser, correlationId: 'close-linked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { linkedExpedienteId: '90000000-0000-4000-8000-000000000099', closureMetadata: { reason: 'Complete' } } });
+    const linked = await owner().selectFrom('matters').select(['status', 'linked_expediente_id']).where('id', '=', linkedMatter).executeTakeFirstOrThrow();
+    expect(linked).toEqual({ status: 'CLOSED', linked_expediente_id: expedienteA });
+    const event = await owner().selectFrom('matter_state_events').select('event_data').where('matter_id', '=', linkedMatter).executeTakeFirstOrThrow();
+    expect(event.event_data).toMatchObject({ linkedExpedienteId: expedienteA });
+    const audit = await owner().selectFrom('audit_events').select('event_data').where('aggregate_id', '=', linkedMatter).where('event_type', '=', 'matter.closed').executeTakeFirstOrThrow();
+    expect(audit.event_data).toMatchObject({ linkedExpedienteId: expedienteA });
+    await expect(persistMatterTransition(app(), { institutionId: institutionA, aggregateId: unlinkedMatter, actorUserId: developmentSeedIds.adminUser, correlationId: 'close-unlinked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { closureMetadata: { reason: 'Complete' } } })).rejects.toThrow(/already be linked/i);
+    expect((await owner().selectFrom('matters').select('status').where('id', '=', unlinkedMatter).executeTakeFirstOrThrow()).status).toBe('RESOLVED');
   });
 });

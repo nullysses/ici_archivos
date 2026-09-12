@@ -1,7 +1,6 @@
 import {
   type DomainEvent,
   type EntityId,
-  type ExpedienteId,
   type Expediente,
   type JsonObject,
   type Matter,
@@ -121,11 +120,12 @@ export function reopenMatter(matter: Matter, reason: string, linkedExpediente: P
   return { aggregate: next, events: [event(matter.id, 'matter.reopened', { state: 'IN_PROGRESS', reason }, reopenedAt)] };
 }
 
-export function closeMatter(matter: Matter, linkedExpedienteId: ExpedienteId, closureMetadata: JsonObject, closedAt: Date): DomainMutation<Matter> {
+export function closeMatter(matter: Matter, closureMetadata: JsonObject, closedAt: Date): DomainMutation<Matter> {
   if (matter.state !== 'RESOLVED') invalidTransition('matter', matter.state, 'closeMatter');
   if (Object.keys(closureMetadata).length === 0) throw new DomainInvariantError('INVALID_CLOSURE', 'Closure metadata is required');
-  const next = { ...matter, state: 'CLOSED' as const, linkedExpedienteId, closureMetadata };
-  return { aggregate: next, events: [event(matter.id, 'matter.closed', { state: 'CLOSED', expedienteId: linkedExpedienteId, closure: closureMetadata }, closedAt)] };
+  if (matter.linkedExpedienteId === undefined) throw new DomainInvariantError('EXPEDIENTE_LINK_REQUIRED', 'A matter must already be linked to an expediente before closure');
+  const next = { ...matter, state: 'CLOSED' as const, closureMetadata };
+  return { aggregate: next, events: [event(matter.id, 'matter.closed', { state: 'CLOSED', expedienteId: matter.linkedExpedienteId, closure: closureMetadata }, closedAt)] };
 }
 
 export function voidMatter(matter: Matter, reason: string, voidedAt: Date): DomainMutation<Matter> {

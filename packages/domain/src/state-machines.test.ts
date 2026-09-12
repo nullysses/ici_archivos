@@ -108,7 +108,7 @@ describe('matter lifecycle commands', () => {
     const linked = linkMatterToExpediente(resolved, openExpediente(), now).aggregate;
     const reopened = reopenMatter(linked, 'Additional review', openExpediente(), now).aggregate;
     const resolvedAgain = resolveMatter(reopened, { resolution: 'done again' }, now).aggregate;
-    const closed = closeMatter(resolvedAgain, expediente, { closedBy: user }, now).aggregate;
+    const closed = closeMatter(resolvedAgain, { closedBy: user }, now).aggregate;
 
     expect(received.state).toBe('RECEIVED');
     expect(assigned.state).toBe('ASSIGNED');
@@ -126,10 +126,12 @@ describe('matter lifecycle commands', () => {
     const otherUser = userId('00000000-0000-4000-8000-000000000011');
     expect(() => startMatter(assignedMatter(), { actorUserId: otherUser, authorizationContext: authorization(otherUser), startedAt: now })).toThrow(/authorized member/i);
     expect(() => voidMatter(inProgressMatter(), 'wrong state', now)).toThrow(/not allowed/);
-    expect(() => closeMatter(resolvedMatter(), expediente, {}, now)).toThrow(/closure metadata/i);
+    expect(() => closeMatter(resolvedMatter(), {}, now)).toThrow(/closure metadata/i);
+    expect(() => closeMatter(resolvedMatter(), { closedBy: user }, now)).toThrow(/already be linked/i);
     expect(() => reassignMatter(assignedMatter(), { assignmentId: entityId('00000000-0000-4000-8000-000000000030'), unitId: unit, userId: user, reason: ' ', assignedAt: now })).toThrow(/reason/i);
     expect(() => reopenMatter(resolvedMatter(), 'Review', openExpediente(), now)).toThrow(/linked expediente/i);
-    const closed = closeMatter(resolvedMatter(), expediente, { closedBy: user }, now).aggregate;
+    const linked = linkMatterToExpediente(resolvedMatter(), openExpediente(), now).aggregate;
+    const closed = closeMatter(linked, { closedBy: user }, now).aggregate;
     expect(() => assignMatter(closed, { assignmentId: entityId('00000000-0000-4000-8000-000000000031'), unitId: unit, assignedAt: now })).toThrow(/not allowed/i);
   });
 });

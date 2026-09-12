@@ -6,6 +6,7 @@ import { createJoseAccessTokenVerifier } from './oidc.js';
 import { createMatterApplicationService } from './matters.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { S3DocumentStorage } from '@ici/integration-storage';
+import { createExpedienteApplicationService } from './expedientes.js';
 
 const config = readApiConfig();
 const database = createDatabase(config.databaseUrl);
@@ -19,6 +20,7 @@ const documentStorage = config.s3Endpoint !== undefined && config.s3AccessKeyId 
 const app = await createApp({
   authenticateAccessToken: (accessToken) => authenticateAccessToken(database, accessTokenVerifier, accessToken),
   matterService: createMatterApplicationService(database),
+  expedienteService: createExpedienteApplicationService(database),
   checkDatabase: () => checkDatabase(database),
   version: process.env.npm_package_version ?? '0.0.0',
   webOrigin: config.webOrigin,

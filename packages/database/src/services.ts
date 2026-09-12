@@ -4,8 +4,8 @@ import type { Selectable } from 'kysely';
 import type { ArchiveTransferState, AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { DocumentsTable, DocumentVersionsTable, IntegrationJobsTable, MatterNotesTable, MattersTable } from './schema.js';
-import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantTransaction } from './index.js';
+import type { DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable } from './schema.js';
+import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
   registerMatter: { from: [], to: 'RECEIVED' },
@@ -56,11 +56,6 @@ function auditEventType(events: Readonly<Record<string, string>>, command: strin
 function assertTransition(command: string, from: string, to: string, allowed: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>>): void {
   const transition = allowed[command];
   if (transition === undefined || !transition.from.includes(from) || transition.to !== to) throw new DomainInvariantError('INVALID_TRANSITION', `${command} is not allowed from ${from} to ${to}`);
-}
-
-function stringEventValue(data: JsonObject | undefined, key: string): string | undefined {
-  const value = data?.[key];
-  return typeof value === 'string' ? value : undefined;
 }
 
 function booleanEventValue(data: JsonObject | undefined, key: string): boolean | undefined {
@@ -258,10 +253,11 @@ export interface CreateExpedientePersistenceInput {
   readonly institutionId: InstitutionId | string;
   readonly expedienteTypeVersionId: string;
   readonly metadata: JsonObject;
-  readonly openedAt: Date;
+  /** Deprecated fixture fields; authoritative timestamps are generated in PostgreSQL. */
+  readonly openedAt?: Date;
   readonly correlationId: string;
   readonly actorUserId?: string;
-  readonly year: number;
+  readonly year?: number;
 }
 
 export async function createExpedienteAtomically(database: Database, input: CreateExpedientePersistenceInput, validateMetadata: ExpedienteMetadataValidator): Promise<{ readonly folio: string }> {
@@ -269,12 +265,26 @@ export async function createExpedienteAtomically(database: Database, input: Crea
     const typeVersion = await transaction.selectFrom('expediente_type_versions').select(['status', 'schema_json']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteTypeVersionId).forUpdate().executeTakeFirst();
     if (typeVersion?.status !== 'PUBLISHED') throw new DomainInvariantError('TYPE_VERSION_NOT_PUBLISHED', 'An expediente requires a published type version');
     if (!validateMetadata(typeVersion.schema_json, input.metadata)) throw new DomainInvariantError('INVALID_METADATA', 'Expediente metadata does not satisfy its published type version');
-    const allocated = await allocateFolio(transaction, { institutionId: input.institutionId, folioKind: 'EXPEDIENTE', folioYear: input.year });
-    await transaction.insertInto('expedientes').values({ id: input.id, institution_id: input.institutionId, folio: allocated.folio, folio_year: input.year, sequence_number: allocated.sequenceNumber, status: 'OPEN', expediente_type_version_id: input.expedienteTypeVersionId, metadata: input.metadata, opened_at: input.openedAt }).execute();
-    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.id, to_status: 'OPEN', command: 'createExpediente', ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), event_data: { folio: allocated.folio }, occurred_at: input.openedAt }).execute();
+    const openedAt = (await sql<{ opened_at: Date }>`select clock_timestamp() as opened_at`.execute(transaction)).rows[0]?.opened_at;
+    if (openedAt === undefined) throw new Error('Expediente creation timestamp was not generated');
+    const year = openedAt.getUTCFullYear();
+    const allocated = await allocateFolio(transaction, { institutionId: input.institutionId, folioKind: 'EXPEDIENTE', folioYear: year });
+    await transaction.insertInto('expedientes').values({ id: input.id, institution_id: input.institutionId, folio: allocated.folio, folio_year: year, sequence_number: allocated.sequenceNumber, status: 'OPEN', expediente_type_version_id: input.expedienteTypeVersionId, metadata: input.metadata, opened_at: openedAt }).execute();
+    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.id, to_status: 'OPEN', command: 'createExpediente', ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), event_data: { folio: allocated.folio }, occurred_at: openedAt }).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente.created', aggregateType: 'expediente', aggregateId: input.id, correlationId: input.correlationId, afterData: { status: 'OPEN', folio: allocated.folio, expedienteTypeVersionId: input.expedienteTypeVersionId } });
     return allocated;
   });
+}
+
+export type ExpedienteReadModel = Selectable<ExpedientesTable>;
+
+export async function findExpedienteById(database: Database, institutionId: InstitutionId | string, expedienteId: string): Promise<ExpedienteReadModel | undefined> {
+  return withTenantTransaction(database, institutionId, (transaction) => transaction
+    .selectFrom('expedientes')
+    .selectAll()
+    .where('institution_id', '=', institutionId)
+    .where('id', '=', expedienteId)
+    .executeTakeFirst());
 }
 
 export interface StateTransitionPersistenceInput {
@@ -328,6 +338,18 @@ export async function assignMatterAtomically(database: Database, input: MatterAs
     if (input.userId !== undefined) {
       const user = await transaction.selectFrom('users').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.userId).where('status', '=', 'ACTIVE').executeTakeFirst();
       if (user === undefined) throw new DomainInvariantError('TARGET_USER_NOT_FOUND', 'Assignment target user was not found');
+      const membership = await transaction.selectFrom('user_role_assignments')
+        .select('id')
+        .where('institution_id', '=', input.institutionId)
+        .where('user_id', '=', input.userId)
+        .where('unit_id', '=', input.unitId)
+        .where('effective_from', '<=', assignedAt)
+        .where((expression) => expression.or([
+          expression('effective_until', 'is', null),
+          expression('effective_until', '>', assignedAt),
+        ]))
+        .executeTakeFirst();
+      if (membership === undefined) throw new DomainInvariantError('TARGET_USER_NOT_IN_UNIT', 'Assignment target user is not an active member of the target unit');
     }
     await transaction.insertInto('matter_assignments').values({ id: input.assignmentId, institution_id: input.institutionId, matter_id: input.matterId, unit_id: input.unitId, ...(input.userId === undefined ? {} : { user_id: input.userId }), ...(input.reason === undefined ? {} : { reason: input.reason }), assigned_at: assignedAt }).execute();
     await transaction.updateTable('matters').set({ status: toStatus, updated_at: new Date() }).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).execute();
@@ -375,17 +397,7 @@ export async function persistMatterTransition(database: Database, input: StateTr
   assertTransition(input.command, input.fromStatus, input.toStatus, matterTransitions);
   if (input.command === 'startMatter' && input.eventData?.authorizedUnitIds !== undefined) throw new DomainInvariantError('INVALID_AUTHORIZATION_EVIDENCE', 'Authorization evidence must not be supplied in event data');
   const reason = input.command === 'reopenMatter' || input.command === 'voidMatter' ? requireReason(input.reason, input.command) : input.reason;
-  await withAuditedTenantTransaction(database, {
-    institutionId: input.institutionId,
-    actorUserId: input.actorUserId,
-    eventType: auditEventType(matterAuditEvents, input.command),
-    aggregateType: 'matter',
-    aggregateId: input.aggregateId,
-    correlationId: input.correlationId,
-    beforeData: { status: input.fromStatus },
-    afterData: { status: input.toStatus },
-    eventData: input.command === 'voidMatter' && reason !== undefined ? { ...(input.eventData ?? {}), reason } : input.eventData,
-  }, async (transaction) => {
+  await withTenantContextTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, correlationId: input.correlationId }, async (transaction) => {
     const current = await transaction.selectFrom('matters').select(['status', 'linked_expediente_id', 'destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).forUpdate().executeTakeFirst();
     if (current === undefined) throw new Error('Matter not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Matter is ${current.status}, expected ${input.fromStatus}`);
@@ -414,15 +426,28 @@ export async function persistMatterTransition(database: Database, input: StateTr
       const linked = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', current.linked_expediente_id).executeTakeFirst();
       if (linked?.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'A resolved matter can only reopen while its linked expediente is open');
     }
+    let authoritativeEventData = input.eventData;
     if (input.command === 'closeMatter') {
-      const linkedExpedienteId = stringEventValue(input.eventData, 'linkedExpedienteId');
+      const linkedExpedienteId = current.linked_expediente_id;
       const closureMetadata = objectEventValue(input.eventData, 'closureMetadata');
-      if (linkedExpedienteId === undefined || closureMetadata === undefined || Object.keys(closureMetadata).length === 0) throw new DomainInvariantError('INVALID_CLOSURE', 'closeMatter requires a linked expediente and closure metadata');
-      changes.linked_expediente_id = linkedExpedienteId;
+      if (linkedExpedienteId === null) throw new DomainInvariantError('EXPEDIENTE_LINK_REQUIRED', 'Matter must already be linked to an expediente before closure');
+      if (closureMetadata === undefined || Object.keys(closureMetadata).length === 0) throw new DomainInvariantError('INVALID_CLOSURE', 'closeMatter requires closure metadata');
       changes.closure_metadata = closureMetadata;
+      authoritativeEventData = { ...(input.eventData ?? {}), linkedExpedienteId };
     }
     await transaction.updateTable('matters').set(changes).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).execute();
-    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.aggregateId, from_status: input.fromStatus, to_status: input.toStatus as MatterState, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(reason === undefined ? {} : { reason }), event_data: input.eventData ?? {}, occurred_at: transitionAt }).execute();
+    await transaction.insertInto('matter_state_events').values({ institution_id: input.institutionId, matter_id: input.aggregateId, from_status: input.fromStatus, to_status: input.toStatus as MatterState, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(reason === undefined ? {} : { reason }), event_data: authoritativeEventData ?? {}, occurred_at: transitionAt }).execute();
+    await appendAuditEvent(transaction, {
+      institutionId: input.institutionId,
+      actorUserId: input.actorUserId,
+      eventType: auditEventType(matterAuditEvents, input.command),
+      aggregateType: 'matter',
+      aggregateId: input.aggregateId,
+      correlationId: input.correlationId,
+      beforeData: { status: input.fromStatus },
+      afterData: { status: input.toStatus },
+      eventData: input.command === 'voidMatter' && reason !== undefined ? { ...(authoritativeEventData ?? {}), reason } : authoritativeEventData,
+    });
   });
 }
 

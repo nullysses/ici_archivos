@@ -11,11 +11,16 @@ const institutionA = '11000000-0000-4000-8000-000000000001';
 const institutionB = '11000000-0000-4000-8000-000000000002';
 const userA = '11000000-0000-4000-8000-000000000003';
 const userB = '11000000-0000-4000-8000-00000000000b';
+const userC = '11000000-0000-4000-8000-000000000011';
 const unitA = '11000000-0000-4000-8000-000000000004';
 const unitB = '11000000-0000-4000-8000-000000000005';
 const classificationA = '11000000-0000-4000-8000-000000000006';
 const unitA2 = '11000000-0000-4000-8000-000000000009';
 const unitA3 = '11000000-0000-4000-8000-00000000000a';
+const roleA = '11000000-0000-4000-8000-00000000000c';
+const assignmentA = '11000000-0000-4000-8000-00000000000d';
+const assignmentA2 = '11000000-0000-4000-8000-00000000000e';
+const assignmentA3 = '11000000-0000-4000-8000-00000000000f';
 const now = '2026-09-11T12:00:00.000Z';
 
 describe('matter HTTP API with real PostgreSQL persistence', () => {
@@ -52,6 +57,17 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     await database.insertInto('users').values([
       { id: userA, institution_id: institutionA, display_name: 'Matter operator', status: 'ACTIVE' },
       { id: userB, institution_id: institutionB, display_name: 'Other institution operator', status: 'ACTIVE' },
+      { id: userC, institution_id: institutionA, display_name: 'Unassigned target', status: 'ACTIVE' },
+    ]).execute();
+    await database.insertInto('roles').values({ id: roleA, code: 'TEST_OPERATOR', name: 'Test operator' }).execute();
+    await database.insertInto('user_role_assignments').values([
+      { id: assignmentA, institution_id: institutionA, user_id: userA, role_id: roleA, unit_id: unitA, effective_from: new Date('2020-01-01T00:00:00.000Z') },
+      { id: assignmentA2, institution_id: institutionA, user_id: userA, role_id: roleA, unit_id: unitA2, effective_from: new Date('2020-01-01T00:00:00.000Z') },
+      { id: assignmentA3, institution_id: institutionA, user_id: userA, role_id: roleA, unit_id: unitA3, effective_from: new Date('2020-01-01T00:00:00.000Z') },
+      { id: '11000000-0000-4000-8000-000000000012', institution_id: institutionA, user_id: userC, role_id: roleA, effective_from: new Date('2020-01-01T00:00:00.000Z') },
+      { id: '11000000-0000-4000-8000-000000000013', institution_id: institutionA, user_id: userC, role_id: roleA, unit_id: unitA2, effective_from: new Date('2020-01-01T00:00:00.000Z') },
+      { id: '11000000-0000-4000-8000-000000000014', institution_id: institutionA, user_id: userC, role_id: roleA, unit_id: unitA, effective_from: new Date('2020-01-01T00:00:00.000Z'), effective_until: new Date('2025-01-01T00:00:00.000Z') },
+      { id: '11000000-0000-4000-8000-000000000015', institution_id: institutionA, user_id: userC, role_id: roleA, unit_id: unitA3, effective_from: new Date('2099-01-01T00:00:00.000Z') },
     ]).execute();
     await database.insertInto('access_classifications').values({ id: classificationA, institution_id: institutionA, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
     currentPrincipal = {
@@ -379,5 +395,18 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/start`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
     expect((await api().inject({ method: 'POST', url: `/matters/${assignedId}/void`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Too late to void' } })).statusCode).toBe(400);
     expect((await db().selectFrom('matters').select('status').where('id', '=', assignedId).executeTakeFirstOrThrow()).status).toBe('IN_PROGRESS');
+  });
+
+  it('requires named assignment targets to have exact active unit membership', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'matter.assign']), unitCapabilities: new Map([[unitA, new Set(['matter.assign'])], [unitA2, new Set(['matter.assign'])], [unitA3, new Set(['matter.assign'])]]) } };
+    const matterId = (await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2039-09-11T12:00:00.000Z' } })).json<{ id: string }>().id;
+    const noMembership = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userC } });
+    expect(noMembership.statusCode).toBe(400);
+    const sibling = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA3, userId: userC } });
+    expect(sibling.statusCode).toBe(400);
+    const exactExpired = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userC } });
+    expect(exactExpired.statusCode).toBe(400);
+    const future = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA3, userId: userC } });
+    expect(future.statusCode).toBe(400);
   });
 });

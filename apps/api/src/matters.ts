@@ -162,7 +162,7 @@ export function createMatterApplicationService(database: Database): MatterApplic
         });
       } catch (error) {
         const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
-        if (code === 'TARGET_UNIT_NOT_FOUND' || code === 'TARGET_USER_NOT_FOUND') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Assignment target is invalid');
+        if (code === 'TARGET_UNIT_NOT_FOUND' || code === 'TARGET_USER_NOT_FOUND' || code === 'TARGET_USER_NOT_IN_UNIT') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Assignment target is invalid');
         if (code === 'NOT_AUTHORIZED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
         if (code === 'REASON_REQUIRED') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Reassignment reason is required');
         if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION') throw new MatterHttpError(400, 'INVALID_TRANSITION', 'Matter state changed; retry the command');

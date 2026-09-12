@@ -13,10 +13,14 @@ import { fileTypeFromBuffer } from 'file-type';
 
 export type DocumentStorageZone = 'QUARANTINE' | 'CLEAN';
 
-export interface StoredObjectHead { readonly sizeBytes: bigint; }
+export interface StoredObjectHead {
+  readonly sizeBytes: bigint;
+  /** Hex-encoded SHA-256 when the storage adapter can verify it. */
+  readonly sha256?: string;
+}
 
 export interface DocumentStoragePort {
-  put(input: { readonly zone: 'QUARANTINE'; readonly key: string; readonly body: ReadableStream<Uint8Array> }): Promise<void>;
+  put(input: { readonly zone: 'QUARANTINE'; readonly key: string; readonly body: ReadableStream<Uint8Array>; readonly sha256?: string }): Promise<void>;
   open(input: { readonly zone: DocumentStorageZone; readonly key: string }): Promise<ReadableStream<Uint8Array>>;
   head(input: { readonly zone: DocumentStorageZone; readonly key: string }): Promise<StoredObjectHead | undefined>;
   copy(input: { readonly from: DocumentStorageZone; readonly to: DocumentStorageZone; readonly key: string }): Promise<void>;
@@ -41,10 +45,15 @@ function isNotFound(error: unknown): boolean {
 export class S3DocumentStorage implements DocumentStoragePort {
   public constructor(private readonly options: S3DocumentStorageOptions) {}
 
-  public async put(input: { readonly zone: 'QUARANTINE'; readonly key: string; readonly body: ReadableStream<Uint8Array> }): Promise<void> {
+  public async put(input: { readonly zone: 'QUARANTINE'; readonly key: string; readonly body: ReadableStream<Uint8Array>; readonly sha256?: string }): Promise<void> {
     await new Upload({
       client: this.options.client,
-      params: { Bucket: bucketFor(this.options, input.zone), Key: input.key, Body: Readable.fromWeb(input.body) },
+      params: {
+        Bucket: bucketFor(this.options, input.zone),
+        Key: input.key,
+        Body: Readable.fromWeb(input.body),
+        ...(input.sha256 === undefined ? {} : { Metadata: { sha256: input.sha256 } }),
+      },
     }).done();
   }
 
@@ -57,7 +66,15 @@ export class S3DocumentStorage implements DocumentStoragePort {
   public async head(input: { readonly zone: DocumentStorageZone; readonly key: string }): Promise<StoredObjectHead | undefined> {
     try {
       const result = await this.options.client.send(new HeadObjectCommand({ Bucket: bucketFor(this.options, input.zone), Key: input.key }));
-      return result.ContentLength === undefined ? undefined : { sizeBytes: BigInt(result.ContentLength) };
+      if (result.ContentLength === undefined) return undefined;
+      const metadataSha256 = result.Metadata?.sha256 ?? result.Metadata?.['x-amz-meta-sha256'];
+      const checksumSha256 = result.ChecksumSHA256 === undefined
+        ? undefined
+        : Buffer.from(result.ChecksumSHA256, 'base64').toString('hex');
+      const sha256 = metadataSha256 ?? checksumSha256;
+      return sha256 === undefined
+        ? { sizeBytes: BigInt(result.ContentLength) }
+        : { sizeBytes: BigInt(result.ContentLength), sha256 };
     } catch (error) {
       if (isNotFound(error)) return undefined;
       throw error;
@@ -72,7 +89,7 @@ export class S3DocumentStorage implements DocumentStoragePort {
     if (source === undefined) throw new Error('Source object was not found');
     const existing = await this.head({ zone: input.to, key: input.key });
     if (existing !== undefined) {
-      if (existing.sizeBytes !== source.sizeBytes) throw new Error('Existing destination object has an unexpected size');
+      assertStoredObjectMatches(source, existing);
       return;
     }
     await this.options.client.send(new CopyObjectCommand({ Bucket: targetBucket, Key: input.key, CopySource: encodeURIComponent(`${sourceBucket}/${input.key}`) }));
@@ -80,6 +97,21 @@ export class S3DocumentStorage implements DocumentStoragePort {
 
   public async remove(input: { readonly zone: DocumentStorageZone; readonly key: string }): Promise<void> {
     await this.options.client.send(new DeleteObjectCommand({ Bucket: bucketFor(this.options, input.zone), Key: input.key }));
+  }
+}
+
+/**
+ * Existing promotion targets are accepted only when their strong identity is
+ * verifiably the same as the quarantine source. Size alone is not sufficient:
+ * distinct evidence can have identical lengths.
+ */
+export function assertStoredObjectMatches(source: StoredObjectHead, existing: StoredObjectHead): void {
+  if (existing.sizeBytes !== source.sizeBytes) throw new Error('Existing destination object has an unexpected size');
+  if (source.sha256 === undefined || existing.sha256 === undefined) {
+    throw new Error('Existing destination object cannot be integrity-verified');
+  }
+  if (existing.sha256.toLowerCase() !== source.sha256.toLowerCase()) {
+    throw new Error('Existing destination object has an unexpected checksum');
   }
 }
 
@@ -129,10 +161,10 @@ function isReasonableUtf8(bytes: Uint8Array): boolean {
 export class FileTypeDocumentMimeDetector implements DocumentMimeDetector {
   public async detect(bytes: Uint8Array): Promise<string | undefined> {
     if (bytes.length === 0) return undefined;
-    if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return 'application/zip';
     let detected: Awaited<ReturnType<typeof fileTypeFromBuffer>>;
     try { detected = await fileTypeFromBuffer(bytes); } catch { detected = undefined; }
     if (detected?.mime !== undefined) return detected.mime;
+    if (isZipSignature(bytes)) return 'application/zip';
     if (!isReasonableUtf8(bytes)) return undefined;
     const text = new TextDecoder().decode(bytes).trimStart();
     if (text.startsWith('<?xml') || text.startsWith('<')) return 'application/xml';
@@ -140,6 +172,10 @@ export class FileTypeDocumentMimeDetector implements DocumentMimeDetector {
     if (text.includes(',') && text.includes('\n')) return 'text/csv';
     return 'text/plain';
   }
+}
+
+function isZipSignature(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
 }
 
 export interface InspectedDocument { readonly sizeBytes: bigint; readonly sha256: string; readonly detectedMimeType: string | undefined; }

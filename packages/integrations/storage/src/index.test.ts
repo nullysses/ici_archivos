@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertAllowedDetectedMimeType,
+  assertStoredObjectMatches,
   documentStorageKey,
   DocumentSizeLimitError,
   FileTypeDocumentMimeDetector,
@@ -14,6 +15,23 @@ function streamOf(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) { for (const chunk of chunks) controller.enqueue(chunk); controller.close(); },
   });
+}
+
+function zipEntry(name: string, contents: string): Uint8Array {
+  const filename = new TextEncoder().encode(name);
+  const data = new TextEncoder().encode(contents);
+  const header = new Uint8Array(30);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x04034b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint32(18, data.byteLength, true);
+  view.setUint32(22, data.byteLength, true);
+  view.setUint16(26, filename.byteLength, true);
+  const result = new Uint8Array(header.byteLength + filename.byteLength + data.byteLength);
+  result.set(header);
+  result.set(filename, header.byteLength);
+  result.set(data, header.byteLength + filename.byteLength);
+  return result;
 }
 
 describe('document storage and intake primitives', () => {
@@ -37,9 +55,28 @@ describe('document storage and intake primitives', () => {
     const detector = new FileTypeDocumentMimeDetector();
     expect(await detector.detect(new TextEncoder().encode('%PDF-1.7\n'))).toBe('application/pdf');
     expect(await detector.detect(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))).toBe('application/zip');
+    expect(await detector.detect(zipEntry('[Content_Types].xml', '<Types ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"></Types>')))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(await detector.detect(zipEntry('mimetype', 'application/vnd.oasis.opendocument.text')))
+      .toBe('application/vnd.oasis.opendocument.text');
     expect(isAllowedDocumentMimeType('application/pdf')).toBe(true);
     expect(isAllowedDocumentMimeType('application/zip')).toBe(false);
     expect(() => assertAllowedDetectedMimeType('application/zip')).toThrow(UnsupportedDocumentMimeError);
+  });
+
+  it('does not accept a same-size CLEAN object without a matching checksum', () => {
+    expect(() => assertStoredObjectMatches(
+      { sizeBytes: 4n, sha256: 'aaaa' },
+      { sizeBytes: 4n, sha256: 'bbbb' },
+    )).toThrow(/checksum/i);
+    expect(() => assertStoredObjectMatches(
+      { sizeBytes: 4n, sha256: 'aaaa' },
+      { sizeBytes: 4n },
+    )).toThrow(/integrity/i);
+    expect(() => assertStoredObjectMatches(
+      { sizeBytes: 4n, sha256: 'AABB' },
+      { sizeBytes: 4n, sha256: 'aabb' },
+    )).not.toThrow();
   });
 
   it('keeps a declared MIME mismatch informational while server detection stays authoritative', () => {

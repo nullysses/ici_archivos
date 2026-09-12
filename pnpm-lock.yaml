@@ -168,6 +168,8 @@ importers:
 
   packages/integrations/atom: {}
 
+  packages/integrations/malware: {}
+
   packages/integrations/signatures: {}
 
   packages/integrations/storage:

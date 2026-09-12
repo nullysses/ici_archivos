@@ -7,14 +7,20 @@ import {
   assignMatterAtomically,
   applyFoundationMigrations,
   approveTransferAndManifestAtomically,
+  acceptMatterDocumentUploadAtomically,
+  acceptMatterDocumentVersionUploadAtomically,
+  authorizeMatterDocumentDownload,
+  claimMalwareScanJobs,
   canPerform,
   createDatabase,
   createDocumentVersionMetadataAtomically,
   createExpedienteSchemaValidator,
   developmentSeedIds,
   persistMatterTransition,
+  prepareMalwareRetryAtomically,
   publishExpedienteTypeVersionAtomically,
   registerMatterAtomically,
+  recordMalwareScanResultAtomically,
   resolveAuthorizationContext,
   resolveEffectivePermissions,
   seedDevelopmentReferenceData,
@@ -37,9 +43,16 @@ const documentVersionTwo = '90000000-0000-4000-8000-000000000010';
 const transferA = '90000000-0000-4000-8000-000000000011';
 const manifestA = '90000000-0000-4000-8000-000000000012';
 const fixedNow = new Date('2026-09-09T12:00:00.000Z');
+const classificationA = '90000000-0000-4000-8000-000000000013';
+const matterDocumentA = '90000000-0000-4000-8000-000000000014';
+const matterDocumentVersionA = '90000000-0000-4000-8000-000000000015';
 
 function assignmentAuthorization(userId: string, institutionId: string) {
   return { userId, institutionId, institutionCapabilities: new Set(['matter.assign'] as const), unitCapabilities: new Map() };
+}
+
+function documentAuthorization(userId: string, institutionId: string) {
+  return { userId, institutionId, institutionCapabilities: new Set(['records.read', 'document.version_open'] as const), unitCapabilities: new Map() };
 }
 
 describe('Step 4b PostgreSQL persistence foundation', () => {
@@ -66,7 +79,8 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       await tx.insertInto('expediente_types').values({ id: typeA, institution_id: institutionA, code: 'STEP4B', name: 'Step 4b type', status: 'ACTIVE' }).execute();
       await tx.insertInto('expediente_type_versions').values({ id: versionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object' }, archival_mapping_json: {}, created_at: fixedNow, published_at: fixedNow }).execute();
       await tx.insertInto('expedientes').values({ id: expedienteA, institution_id: institutionA, folio: 'EXP-2026-000501', folio_year: 2026, sequence_number: 501, status: 'OPEN', expediente_type_version_id: versionA, metadata: { subject: 'Step 4b' }, opened_at: fixedNow }).execute();
-      await tx.insertInto('matters').values({ id: matterA, institution_id: institutionA, folio: 'OP-2026-000501', folio_year: 2026, sequence_number: 501, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'A' }, linked_expediente_id: expedienteA }).execute();
+      await tx.insertInto('access_classifications').values({ id: classificationA, institution_id: institutionA, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
+      await tx.insertInto('matters').values({ id: matterA, institution_id: institutionA, folio: 'OP-2026-000501', folio_year: 2026, sequence_number: 501, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'A', operationalVisibility: 'INSTITUTION' }, linked_expediente_id: expedienteA, access_classification_id: classificationA }).execute();
       await tx.insertInto('matter_state_events').values({ institution_id: institutionA, matter_id: matterA, to_status: 'RECEIVED', command: 'registerMatter', event_data: {}, occurred_at: fixedNow }).execute();
       await tx.insertInto('documents').values({ id: documentA, institution_id: institutionA, expediente_id: expedienteA, document_type: 'record', title: 'Document' }).execute();
       await tx.insertInto('archive_transfers').values({ id: transferA, institution_id: institutionA, expediente_id: expedienteA, status: 'DRAFT' }).execute();
@@ -134,6 +148,69 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       expect(await repositories.transfers.byId(transferA)).toBeUndefined();
       expect(await repositories.expedienteTypes.versionById(versionA)).toBeUndefined();
     });
+  });
+
+  it('accepts a matter document with a durable malware job and atomically records scan outcomes', async () => {
+    const document = await acceptMatterDocumentUploadAtomically(app(), {
+      institutionId: institutionA,
+      matterId: matterA,
+      documentId: matterDocumentA,
+      versionId: matterDocumentVersionA,
+      documentType: 'record',
+      title: 'Matter document',
+      originalFilename: 'received.pdf',
+      detectedMimeType: 'application/pdf',
+      declaredMimeType: 'application/pdf',
+      sizeBytes: 12,
+      sha256: 'c'.repeat(64),
+      storageKey: 'v1/matter-document',
+      malwareScanStatus: 'PENDING_SCAN',
+      createdBy: developmentSeedIds.adminUser,
+      correlationId: 'matter-document-accepted',
+      authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA),
+    });
+    expect(document.version.version_number).toBe(1);
+    expect(document.version.malware_scan_status).toBe('PENDING_SCAN');
+    expect(document.document.current_version_id).toBe(matterDocumentVersionA);
+    expect(document.job.idempotency_key).toBe(`malware-scan:${matterDocumentVersionA}`);
+    const audits = await withTenantTransaction(app(), institutionA, (tx) => tx.selectFrom('audit_events').select('event_type').where('aggregate_id', '=', matterDocumentA).orderBy('occurred_at').execute());
+    expect(audits.map((row) => row.event_type)).toEqual(['document.created', 'document.version_created']);
+
+    const claimed = await claimMalwareScanJobs(app(), institutionA, 1, fixedNow);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.attempt_count).toBe(1);
+    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed[0]?.id ?? '', versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-000000000016', result: 'CLEAN', engine: 'clamd', scannedAt: fixedNow, correlationId: 'matter-document-scan' });
+    const download = await authorizeMatterDocumentDownload(app(), { institutionId: institutionA, documentId: matterDocumentA, versionId: matterDocumentVersionA, authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
+    expect(download.sha256).toBe('c'.repeat(64));
+    expect(download.sizeBytes).toBe('12');
+    const replacement = await acceptMatterDocumentVersionUploadAtomically(app(), {
+      institutionId: institutionA,
+      documentId: matterDocumentA,
+      versionId: '90000000-0000-4000-8000-00000000001a',
+      originalFilename: 'replacement.pdf',
+      detectedMimeType: 'application/pdf',
+      sizeBytes: 13,
+      sha256: 'e'.repeat(64),
+      storageKey: 'v1/matter-document-replacement',
+      malwareScanStatus: 'PENDING_SCAN',
+      createdBy: developmentSeedIds.adminUser,
+      replacementReason: 'Corrected source file',
+      correlationId: 'matter-document-replacement',
+      authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA),
+    });
+    expect(replacement.version.version_number).toBe(2);
+  });
+
+  it('serializes failed malware scans and durable retries', async () => {
+    const document = '90000000-0000-4000-8000-000000000017';
+    const version = '90000000-0000-4000-8000-000000000018';
+    await acceptMatterDocumentUploadAtomically(app(), { institutionId: institutionA, matterId: matterA, documentId: document, versionId: version, documentType: 'record', title: 'Retry document', originalFilename: 'retry.pdf', detectedMimeType: 'application/pdf', sizeBytes: 4, sha256: 'd'.repeat(64), storageKey: 'v1/retry-document', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'retry-accept', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
+    const claimed = (await claimMalwareScanJobs(app(), institutionA, 10, fixedNow)).find((job) => job.aggregate_id === version);
+    expect(claimed).toBeDefined();
+    await recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: claimed?.id ?? '', versionId: version, scanId: '90000000-0000-4000-8000-000000000019', result: 'SCAN_FAILED', engine: 'clamd', error: 'daemon unavailable', scannedAt: fixedNow, correlationId: 'retry-failed' });
+    await prepareMalwareRetryAtomically(app(), { institutionId: institutionA, jobId: claimed?.id ?? '', versionId: version, nextAttemptAt: new Date(fixedNow.getTime() + 60_000), correlationId: 'retry-scheduled' });
+    const retry = (await claimMalwareScanJobs(app(), institutionA, 10, new Date(fixedNow.getTime() + 60_001))).find((job) => job.aggregate_id === version);
+    expect(retry?.attempt_count).toBe(2);
   });
 
   it('seeds deterministic reference data idempotently without credentials', async () => {

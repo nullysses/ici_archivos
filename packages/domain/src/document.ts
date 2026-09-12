@@ -1,15 +1,18 @@
-import { type Document, type DocumentVersion, type DocumentId, type DocumentVersionId, type ExpedienteId, type InstitutionId, type JsonObject, type MalwareScanStatus, type UserId, type DomainEvent, DomainInvariantError, requireNonBlank } from './types.js';
+import { type Document, type DocumentVersion, type DocumentId, type DocumentVersionId, type ExpedienteId, type MatterId, type InstitutionId, type JsonObject, type MalwareScanStatus, type UserId, type DomainEvent, DomainInvariantError, requireNonBlank } from './types.js';
 
 export interface CreateDocumentInput {
   readonly id: DocumentId;
   readonly institutionId: InstitutionId;
-  readonly expedienteId: ExpedienteId;
+  /** A logical document belongs to exactly one operational parent. */
+  readonly expedienteId?: ExpedienteId;
+  readonly matterId?: MatterId;
   readonly documentType: string;
   readonly title: string;
   readonly createdAt: Date;
 }
 
 export function createDocument(input: CreateDocumentInput): Document {
+  if ((input.expedienteId === undefined) === (input.matterId === undefined)) throw new DomainInvariantError('INVALID_DOCUMENT_PARENT', 'A logical document must have exactly one parent');
   return { ...input, documentType: requireNonBlank(input.documentType, 'Document type'), title: requireNonBlank(input.title, 'Document title'), latestVersionNumber: 0 };
 }
 

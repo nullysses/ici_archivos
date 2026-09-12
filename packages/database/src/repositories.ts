@@ -40,8 +40,10 @@ export class TenantRepositories {
   public readonly documents = {
     byId: (id: string) => this.transaction.selectFrom('documents').selectAll().where('institution_id', '=', this.institutionId).where('id', '=', id).executeTakeFirst(),
     forExpediente: (expedienteId: string) => this.transaction.selectFrom('documents').selectAll().where('institution_id', '=', this.institutionId).where('expediente_id', '=', expedienteId).orderBy('created_at').execute(),
+    forMatter: (matterId: string) => this.transaction.selectFrom('documents').selectAll().where('institution_id', '=', this.institutionId).where('matter_id', '=', matterId).orderBy('created_at').orderBy('id').execute(),
     versions: (documentId: string) => this.transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', this.institutionId).where('document_id', '=', documentId).orderBy('version_number', 'desc').execute(),
     currentVersion: (documentId: string) => this.transaction.selectFrom('documents as d').innerJoin('document_versions as v', (join) => join.onRef('v.id', '=', 'd.current_version_id').onRef('v.institution_id', '=', 'd.institution_id')).selectAll('v').where('d.institution_id', '=', this.institutionId).where('d.id', '=', documentId).executeTakeFirst(),
+    malwareScans: (versionId: string) => this.transaction.selectFrom('malware_scans').selectAll().where('institution_id', '=', this.institutionId).where('document_version_id', '=', versionId).orderBy('created_at').orderBy('id').execute(),
   };
 
   public readonly transfers = {

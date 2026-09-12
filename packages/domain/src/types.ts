@@ -195,7 +195,8 @@ export interface DocumentVersion {
 export interface Document {
   readonly id: DocumentId;
   readonly institutionId: InstitutionId;
-  readonly expedienteId: ExpedienteId;
+  readonly expedienteId?: ExpedienteId | undefined;
+  readonly matterId?: MatterId | undefined;
   readonly documentType: string;
   readonly title: string;
   readonly currentVersionId?: DocumentVersionId | undefined;

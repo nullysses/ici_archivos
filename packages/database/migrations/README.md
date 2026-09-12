@@ -2,7 +2,9 @@
 
 `001_foundation.sql` is executed by the privileged migration role through
 `applyFoundationMigrations`; `002_foundation_hardening.sql` upgrades existing
-Step 4a databases and is also applied to fresh databases. The runtime
+Step 4a databases and is also applied to fresh databases. Later forward-only
+migrations, including `009_document_intake_hardening.sql`, are applied in
+order by the same runner. The runtime
 application role must be provisioned
 separately and must not own these tables, be a superuser, or have
 `BYPASSRLS`. Runtime transactions set the local `app.institution_id` setting

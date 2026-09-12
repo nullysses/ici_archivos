@@ -213,6 +213,24 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     expect(retry?.attempt_count).toBe(2);
   });
 
+  it('rejects unrelated integration jobs and inconsistent matter visibility', async () => {
+    const unrelatedJob = '90000000-0000-4000-8000-00000000001b';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('integration_jobs').values({ id: unrelatedJob, institution_id: institutionA, job_type: 'atom.sync', aggregate_type: 'document_version', aggregate_id: matterDocumentVersionA, status: 'PENDING', idempotency_key: 'unrelated-document-job', correlation_id: 'unrelated-document-job', attempt_count: 0, payload: {} }).execute();
+      await tx.updateTable('integration_jobs').set({ status: 'RUNNING', attempt_count: 1 }).where('id', '=', unrelatedJob).execute();
+    });
+    await expect(recordMalwareScanResultAtomically(app(), { institutionId: institutionA, jobId: unrelatedJob, versionId: matterDocumentVersionA, scanId: '90000000-0000-4000-8000-00000000001c', result: 'CLEAN', engine: 'clamd', correlationId: 'unrelated-document-job' })).rejects.toThrow(/malware scan job/i);
+
+    const mismatchClassification = '90000000-0000-4000-8000-00000000001d';
+    const mismatchMatter = '90000000-0000-4000-8000-00000000001e';
+    const mismatchDocument = '90000000-0000-4000-8000-00000000001f';
+    await withTenantTransaction(owner(), institutionA, async (tx) => {
+      await tx.insertInto('access_classifications').values({ id: mismatchClassification, institution_id: institutionA, legal_classification: 'PUBLIC', operational_visibility: 'UNIT' }).execute();
+      await tx.insertInto('matters').values({ id: mismatchMatter, institution_id: institutionA, folio: 'OP-2026-000605', folio_year: 2026, sequence_number: 605, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { operationalVisibility: 'INSTITUTION' }, access_classification_id: mismatchClassification }).execute();
+    });
+    await expect(acceptMatterDocumentUploadAtomically(app(), { institutionId: institutionA, matterId: mismatchMatter, documentId: mismatchDocument, versionId: '90000000-0000-4000-8000-000000000020', documentType: 'record', title: 'Mismatch', originalFilename: 'mismatch.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'f'.repeat(64), storageKey: 'mismatch', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'visibility-mismatch', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) })).rejects.toThrow(/visibility/i);
+  });
+
   it('seeds deterministic reference data idempotently without credentials', async () => {
     await seedDevelopmentReferenceData(owner());
     await seedDevelopmentReferenceData(owner());
@@ -502,16 +520,15 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     const matter = '90000000-0000-4000-8000-000000000060';
     const document = '90000000-0000-4000-8000-000000000061';
     await withTenantTransaction(owner(), institutionA, async (tx) => {
-      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000601', folio_year: 2026, sequence_number: 601, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'matter document' } }).execute();
-      await tx.insertInto('documents').values({ id: document, institution_id: institutionA, matter_id: matter, document_type: 'record', title: 'Matter document' }).execute();
+      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000601', folio_year: 2026, sequence_number: 601, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'matter document', operationalVisibility: 'INSTITUTION' }, access_classification_id: classificationA }).execute();
     });
-    await createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: '90000000-0000-4000-8000-000000000062', originalFilename: 'one.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'c'.repeat(64), storageKey: 'matter-one', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'matter-v1' });
+    await acceptMatterDocumentUploadAtomically(app(), { institutionId: institutionA, matterId: matter, documentId: document, versionId: '90000000-0000-4000-8000-000000000062', documentType: 'record', title: 'Matter document', originalFilename: 'one.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'c'.repeat(64), storageKey: 'matter-one', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'matter-v1', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
     await withTenantTransaction(owner(), institutionA, async (tx) => { await sql`ALTER TABLE matters DISABLE TRIGGER USER`.execute(tx); await tx.updateTable('matters').set({ status: 'IN_PROGRESS' }).where('id', '=', matter).execute(); await sql`ALTER TABLE matters ENABLE TRIGGER USER`.execute(tx); });
-    await createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: '90000000-0000-4000-8000-000000000063', originalFilename: 'two.pdf', detectedMimeType: 'application/pdf', sizeBytes: 2, sha256: 'd'.repeat(64), storageKey: 'matter-two', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'replacement', correlationId: 'matter-v2' });
+    await acceptMatterDocumentVersionUploadAtomically(app(), { institutionId: institutionA, documentId: document, versionId: '90000000-0000-4000-8000-000000000063', originalFilename: 'two.pdf', detectedMimeType: 'application/pdf', sizeBytes: 2, sha256: 'd'.repeat(64), storageKey: 'matter-two', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'replacement', correlationId: 'matter-v2', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
     await withTenantTransaction(app(), institutionA, async (tx) => {
       expect(await tenantRepositories(tx, institutionA).documents.versions(document)).toMatchObject([{ version_number: 2 }, { version_number: 1 }]);
       expect((await tenantRepositories(tx, institutionA).documents.byId(document))?.current_version_id).toBe('90000000-0000-4000-8000-000000000063');
-      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('matter-v1')).toHaveLength(1);
+      expect(await tenantRepositories(tx, institutionA).audit.forCorrelation('matter-v1')).toHaveLength(2);
     });
   });
 
@@ -598,14 +615,14 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     const matter = '90000000-0000-4000-8000-000000000069';
     const document = '90000000-0000-4000-8000-000000000070';
     await withTenantTransaction(owner(), institutionA, async (tx) => {
-      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000603', folio_year: 2026, sequence_number: 603, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'concurrent' } }).execute();
-      await tx.insertInto('documents').values({ id: document, institution_id: institutionA, matter_id: matter, document_type: 'record', title: 'Concurrent' }).execute();
+      await tx.insertInto('matters').values({ id: matter, institution_id: institutionA, folio: 'OP-2026-000603', folio_year: 2026, sequence_number: 603, status: 'RECEIVED', received_at: fixedNow, intake_metadata: { subject: 'concurrent', operationalVisibility: 'INSTITUTION' }, access_classification_id: classificationA }).execute();
     });
-    const version = (id: string, hash: string, correlationId: string) => createDocumentVersionMetadataAtomically(app(), { institutionId: institutionA, documentId: document, versionId: id, originalFilename: `${id}.pdf`, detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: hash, storageKey: id, malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'concurrent request', correlationId });
-    await Promise.all([version('90000000-0000-4000-8000-000000000071', 'f'.repeat(64), 'concurrent-1'), version('90000000-0000-4000-8000-000000000072', '0'.repeat(64), 'concurrent-2')]);
+    await acceptMatterDocumentUploadAtomically(app(), { institutionId: institutionA, matterId: matter, documentId: document, versionId: '90000000-0000-4000-8000-000000000071', documentType: 'record', title: 'Concurrent', originalFilename: 'initial.pdf', detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: 'a'.repeat(64), storageKey: 'initial-concurrent', malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, correlationId: 'concurrent-initial', authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
+    const version = (id: string, hash: string, correlationId: string) => acceptMatterDocumentVersionUploadAtomically(app(), { institutionId: institutionA, documentId: document, versionId: id, originalFilename: `${id}.pdf`, detectedMimeType: 'application/pdf', sizeBytes: 1, sha256: hash, storageKey: id, malwareScanStatus: 'PENDING_SCAN', createdBy: developmentSeedIds.adminUser, replacementReason: 'concurrent request', correlationId, authorizationContext: documentAuthorization(developmentSeedIds.adminUser, institutionA) });
+    await Promise.all([version('90000000-0000-4000-8000-000000000072', 'f'.repeat(64), 'concurrent-1'), version('90000000-0000-4000-8000-000000000073', '0'.repeat(64), 'concurrent-2')]);
     await withTenantTransaction(app(), institutionA, async (tx) => {
       const versions = await tenantRepositories(tx, institutionA).documents.versions(document);
-      expect(versions.map((row) => row.version_number).sort()).toEqual([1, 2]);
+      expect(versions.map((row) => row.version_number).sort()).toEqual([1, 2, 3]);
       expect((await tenantRepositories(tx, institutionA).documents.byId(document))?.current_version_id).toBe(versions[0]?.id);
     });
   });

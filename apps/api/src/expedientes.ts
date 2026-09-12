@@ -75,7 +75,14 @@ export function installExpedienteRoutes(app: FastifyInstance, service: Expedient
   const errors = { 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } as const;
   app.post<{ Body: ExpedienteCreateRequest; Reply: ExpedienteResponse }>(
     '/expedientes',
-    { preHandler, preValidation: (request) => rejectUnknownFields(request.body), schema: { body: ExpedienteCreateRequestSchema, response: { 201: ExpedienteResponseSchema, ...errors } } },
+    { preHandler, preValidation: (request, _reply, done) => {
+      try {
+        rejectUnknownFields(request.body);
+        done();
+      } catch (error: unknown) {
+        done(error instanceof Error ? error : new Error('Request validation failed'));
+      }
+    }, schema: { body: ExpedienteCreateRequestSchema, response: { 201: ExpedienteResponseSchema, ...errors } } },
     async (request, reply) => {
       const principal = request.principal;
       if (!canPerform(principal.authorization, 'expediente.create')) throw new ExpedienteHttpError(403, 'FORBIDDEN', 'Access denied');

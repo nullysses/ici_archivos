@@ -843,6 +843,19 @@ export async function claimMalwareScanJobs(database: Database, institutionId: In
   });
 }
 
+export interface MalwareScanTarget {
+  readonly storageKey: string;
+  readonly status: DocumentVersionsTable['malware_scan_status'];
+}
+
+/** Loads the authoritative scan target after a job has been claimed. Payloads are hints only. */
+export async function findMalwareScanTarget(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly versionId: string }): Promise<MalwareScanTarget | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('integration_jobs as j').innerJoin('document_versions as v', (join) => join.onRef('v.id', '=', 'j.aggregate_id').onRef('v.institution_id', '=', 'j.institution_id')).select(['v.storage_key as storageKey', 'v.malware_scan_status as status']).where('j.institution_id', '=', input.institutionId).where('j.id', '=', input.jobId).where('j.job_type', '=', 'document.malware_scan').where('j.aggregate_type', '=', 'document_version').where('j.aggregate_id', '=', input.versionId).executeTakeFirst();
+    return row;
+  });
+}
+
 export async function publishExpedienteTypeVersionAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly actorUserId?: string; readonly correlationId: string; readonly publishedAt: Date }, validateSchemaDefinition: (schema: JsonObject) => void): Promise<void> {
   await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente_type_version.published', aggregateType: 'expediente_type_version', aggregateId: input.versionId, correlationId: input.correlationId, afterData: { status: 'PUBLISHED', publishedAt: input.publishedAt.toISOString() } }, async (transaction) => {
     const draft = await transaction.selectFrom('expediente_type_versions').select(['status', 'schema_json']).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();

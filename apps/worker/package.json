@@ -10,10 +10,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.943.0",
     "@ici/config": "workspace:*",
+    "@ici/database": "workspace:*",
+    "@ici/integration-malware": "workspace:*",
+    "@ici/integration-storage": "workspace:*",
     "bullmq": "6.3.4",
     "ioredis": "5.8.2"
   },
-  "devDependencies": { "tsx": "4.23.13" }
+  "devDependencies": { "kysely": "0.29.5", "tsx": "4.23.13" }
 }
-

@@ -20,6 +20,19 @@ export interface ApiConfig {
 
 export interface WorkerConfig {
   readonly redisUrl: string;
+  readonly databaseUrl?: string | undefined;
+  readonly clamavHost?: string | undefined;
+  readonly clamavPort?: number | undefined;
+  readonly clamavConnectTimeoutMs?: number | undefined;
+  readonly clamavReadTimeoutMs?: number | undefined;
+  readonly s3Endpoint?: string | undefined;
+  readonly s3Region?: string | undefined;
+  readonly s3AccessKeyId?: string | undefined;
+  readonly s3SecretAccessKey?: string | undefined;
+  readonly s3QuarantineBucket?: string | undefined;
+  readonly s3CleanBucket?: string | undefined;
+  readonly s3ForcePathStyle?: boolean | undefined;
+  readonly malwarePollIntervalMs?: number | undefined;
 }
 
 export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): ApiConfig {
@@ -66,7 +79,29 @@ export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): Api
 }
 
 export function readWorkerConfig(environment: NodeJS.ProcessEnv = process.env): WorkerConfig {
-  return { redisUrl: environment.REDIS_URL ?? 'redis://127.0.0.1:6379' };
+  const production = environment.NODE_ENV === 'production';
+  const databaseUrl = blankToUndefined(environment.DATABASE_URL) ?? (production ? undefined : 'postgres://ici_app:change-me-local-only@127.0.0.1:5432/ici_archivos');
+  const clamavHost = blankToUndefined(environment.CLAMAV_HOST);
+  const s3Endpoint = blankToUndefined(environment.S3_ENDPOINT);
+  const s3AccessKeyId = blankToUndefined(environment.S3_ACCESS_KEY_ID);
+  const s3SecretAccessKey = blankToUndefined(environment.S3_SECRET_ACCESS_KEY);
+  const s3QuarantineBucket = blankToUndefined(environment.S3_QUARANTINE_BUCKET);
+  const s3CleanBucket = blankToUndefined(environment.S3_CLEAN_BUCKET);
+  if (production) {
+    requireValue(databaseUrl, 'DATABASE_URL');
+    requireValue(clamavHost, 'CLAMAV_HOST');
+    requireValue(s3Endpoint, 'S3_ENDPOINT');
+    requireValue(s3AccessKeyId, 'S3_ACCESS_KEY_ID');
+    requireValue(s3SecretAccessKey, 'S3_SECRET_ACCESS_KEY');
+    requireValue(s3QuarantineBucket, 'S3_QUARANTINE_BUCKET');
+    requireValue(s3CleanBucket, 'S3_CLEAN_BUCKET');
+    if (!isHttpsUrl(s3Endpoint)) throw new Error('S3_ENDPOINT must use HTTPS in production');
+  }
+  return {
+    redisUrl: environment.REDIS_URL ?? 'redis://127.0.0.1:6379', databaseUrl, clamavHost,
+    clamavPort: readOptionalPort(environment.CLAMAV_PORT, 3310), clamavConnectTimeoutMs: readOptionalPositive(environment.CLAMAV_CONNECT_TIMEOUT_MS, 5000), clamavReadTimeoutMs: readOptionalPositive(environment.CLAMAV_READ_TIMEOUT_MS, 30000),
+    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000),
+  };
 }
 
 function readPort(value: string | undefined, fallback: number): number {
@@ -77,6 +112,9 @@ function readPort(value: string | undefined, fallback: number): number {
   }
   return parsed;
 }
+
+function readOptionalPort(value: string | undefined, fallback: number): number { return value === undefined ? fallback : readPort(value, fallback); }
+function readOptionalPositive(value: string | undefined, fallback: number): number { if (value === undefined) return fallback; const parsed = Number(value); if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`Invalid positive integer: ${value}`); return parsed; }
 
 function blankToUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();

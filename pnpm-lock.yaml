@@ -130,9 +130,21 @@ importers:
 
   apps/worker:
     dependencies:
+      '@aws-sdk/client-s3':
+        specifier: 3.943.0
+        version: 3.943.0
       '@ici/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@ici/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@ici/integration-malware':
+        specifier: workspace:*
+        version: link:../../packages/integrations/malware
+      '@ici/integration-storage':
+        specifier: workspace:*
+        version: link:../../packages/integrations/storage
       bullmq:
         specifier: 6.3.4
         version: 6.3.4(ioredis@5.8.2)(pg@8.23.0)
@@ -140,6 +152,9 @@ importers:
         specifier: 5.8.2
         version: 5.8.2
     devDependencies:
+      kysely:
+        specifier: 0.29.5
+        version: 0.29.5
       tsx:
         specifier: 4.23.13
         version: 4.23.13

@@ -10,10 +10,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.943.0",
     "@fastify/cors": "11.3.0",
+    "@fastify/multipart": "9.2.1",
     "@ici/config": "workspace:*",
     "@ici/contracts": "workspace:*",
     "@ici/database": "workspace:*",
+    "@ici/integration-storage": "workspace:*",
     "fastify": "5.6.0",
     "jose": "^6.2.12"
   },

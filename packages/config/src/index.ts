@@ -8,6 +8,14 @@ export interface ApiConfig {
   readonly oidcJwksUri: string | undefined;
   readonly oidcDiscoveryUrl: string | undefined;
   readonly isProduction: boolean;
+  readonly s3Endpoint?: string | undefined;
+  readonly s3Region?: string | undefined;
+  readonly s3AccessKeyId?: string | undefined;
+  readonly s3SecretAccessKey?: string | undefined;
+  readonly s3QuarantineBucket?: string | undefined;
+  readonly s3CleanBucket?: string | undefined;
+  readonly s3ForcePathStyle?: boolean | undefined;
+  readonly fileUploadDefaultMaxBytes?: bigint | undefined;
 }
 
 export interface WorkerConfig {
@@ -21,6 +29,12 @@ export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): Api
   const oidcAudience = blankToUndefined(environment.OIDC_AUDIENCE);
   const oidcJwksUri = blankToUndefined(environment.OIDC_JWKS_URI);
   const oidcDiscoveryUrl = blankToUndefined(environment.OIDC_DISCOVERY_URL);
+  const s3Endpoint = blankToUndefined(environment.S3_ENDPOINT);
+  const s3AccessKeyId = blankToUndefined(environment.S3_ACCESS_KEY_ID);
+  const s3SecretAccessKey = blankToUndefined(environment.S3_SECRET_ACCESS_KEY);
+  const s3QuarantineBucket = blankToUndefined(environment.S3_QUARANTINE_BUCKET);
+  const s3CleanBucket = blankToUndefined(environment.S3_CLEAN_BUCKET);
+  const fileUploadDefaultMaxBytes = environment.FILE_UPLOAD_DEFAULT_MAX_BYTES === undefined ? 500n * 1024n * 1024n : readByteLimit(environment.FILE_UPLOAD_DEFAULT_MAX_BYTES, 'FILE_UPLOAD_DEFAULT_MAX_BYTES');
   if (isProduction) {
     requireValue(databaseUrl, 'DATABASE_URL');
     requireValue(oidcIssuer, 'OIDC_ISSUER');
@@ -39,6 +53,14 @@ export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): Api
     oidcAudience,
     oidcJwksUri,
     oidcDiscoveryUrl,
+    s3Endpoint,
+    s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1',
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3QuarantineBucket,
+    s3CleanBucket,
+    s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true',
+    fileUploadDefaultMaxBytes,
     isProduction,
   };
 }
@@ -71,4 +93,12 @@ function isHttpsUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function readByteLimit(value: string, name: string): bigint {
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n || parsed > 2n * 1024n * 1024n * 1024n) throw new Error();
+    return parsed;
+  } catch { throw new Error(`${name} must be an integer between 0 and 2147483648 bytes`); }
 }

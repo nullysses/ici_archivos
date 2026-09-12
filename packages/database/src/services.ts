@@ -157,6 +157,86 @@ async function effectiveMatterUnit(transaction: DatabaseTransaction, institution
   return assignment?.unit_id ?? destinationUnitId;
 }
 
+export interface MatterDocumentReadModel {
+  readonly document: Selectable<DocumentsTable>;
+  readonly versions: readonly Selectable<DocumentVersionsTable>[];
+}
+
+/** Short, non-locking preflight used before object-storage I/O. Final acceptance rechecks all of this under lock. */
+export async function authorizeMatterDocumentUploadPreflight(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly matterId?: string;
+  readonly documentId?: string;
+  readonly authorizationContext: AuthorizationContext;
+  readonly actorUserId: string;
+}): Promise<void> {
+  await withTenantTransaction(database, input.institutionId, async (transaction) => {
+    let matterId = input.matterId;
+    if (input.documentId !== undefined) {
+      const document = await transaction.selectFrom('documents').select(['matter_id', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).executeTakeFirst();
+      if (document === undefined || document.matter_id === null || document.expediente_id !== null) throw new DomainInvariantError('DOCUMENT_NOT_FOUND', 'Document was not found');
+      matterId = document.matter_id;
+    }
+    if (matterId === undefined) throw new DomainInvariantError('MATTER_NOT_FOUND', 'Matter was not found');
+    const matter = await transaction.selectFrom('matters').select(['status', 'destination_unit_id', 'intake_metadata', 'access_classification_id']).where('institution_id', '=', input.institutionId).where('id', '=', matterId).executeTakeFirst();
+    if (matter === undefined) throw new DomainInvariantError('MATTER_NOT_FOUND', 'Matter was not found');
+    await assertMatterDocumentAuthorization(transaction, String(input.institutionId), matterId, matter, input.authorizationContext, input.actorUserId);
+  });
+}
+
+export async function findMatterDocuments(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<readonly MatterDocumentReadModel[]> {
+  return withTenantTransaction(database, institutionId, async (transaction) => {
+    const documents = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', institutionId).where('matter_id', '=', matterId).orderBy('created_at').orderBy('id').execute();
+    const result: MatterDocumentReadModel[] = [];
+    for (const document of documents) {
+      const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', institutionId).where('document_id', '=', document.id).orderBy('version_number').execute();
+      result.push({ document, versions });
+    }
+    return result;
+  });
+}
+
+export async function findMatterDocumentsAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly matterId: string; readonly authorizationContext: AuthorizationContext }): Promise<readonly MatterDocumentReadModel[] | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const matter = await transaction.selectFrom('matters').select(['destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forShare().executeTakeFirst();
+    if (matter === undefined) return undefined;
+    const visibility = matter.intake_metadata.operationalVisibility;
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+    const unit = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, matter.destination_unit_id);
+    if (!canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    const documents = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('matter_id', '=', input.matterId).orderBy('created_at').orderBy('id').execute();
+    const result: MatterDocumentReadModel[] = [];
+    for (const document of documents) {
+      const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('document_id', '=', document.id).orderBy('version_number').execute();
+      result.push({ document, versions });
+    }
+    return result;
+  });
+}
+
+export async function findMatterDocumentVersions(database: Database, institutionId: InstitutionId | string, documentId: string): Promise<MatterDocumentReadModel | undefined> {
+  return withTenantTransaction(database, institutionId, async (transaction) => {
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', institutionId).where('id', '=', documentId).where('matter_id', 'is not', null).where('expediente_id', 'is', null).executeTakeFirst();
+    if (document === undefined) return undefined;
+    const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', institutionId).where('document_id', '=', documentId).orderBy('version_number').execute();
+    return { document, versions };
+  });
+}
+
+export async function findMatterDocumentVersionsAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly documentId: string; readonly authorizationContext: AuthorizationContext }): Promise<MatterDocumentReadModel | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('documents as d').innerJoin('matters as m', (join) => join.onRef('m.id', '=', 'd.matter_id').onRef('m.institution_id', '=', 'd.institution_id')).select(['d.id', 'd.matter_id', 'd.expediente_id', 'm.destination_unit_id', 'm.intake_metadata']).where('d.institution_id', '=', input.institutionId).where('d.id', '=', input.documentId).where('d.matter_id', 'is not', null).where('d.expediente_id', 'is', null).forShare().executeTakeFirst();
+    if (row === undefined || row.matter_id === null) return undefined;
+    const visibility = row.intake_metadata.operationalVisibility;
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT') throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+    const unit = await effectiveMatterUnit(transaction, String(input.institutionId), row.matter_id, row.destination_unit_id);
+    if (!canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).executeTakeFirstOrThrow();
+    const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('document_id', '=', input.documentId).orderBy('version_number').execute();
+    return { document, versions };
+  });
+}
+
 export async function findMatterById(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<MatterReadModel | undefined> {
   return withTenantTransaction(database, institutionId, async (transaction) => {
     const matter = await transaction.selectFrom('matters').selectAll().where('institution_id', '=', institutionId).where('id', '=', matterId).executeTakeFirst();
@@ -696,6 +776,15 @@ export async function authorizeMatterDocumentDownload(database: Database, input:
     if (row.malware_scan_status !== 'CLEAN') throw new DomainInvariantError('DOCUMENT_NOT_AVAILABLE', 'Document is not available for download');
     return { versionId: row.version_id, storageKey: row.storage_key, originalFilename: row.original_filename, detectedMimeType: row.detected_mime_type, sizeBytes: row.size_bytes, sha256: row.sha256 };
   });
+}
+
+export async function authorizeMatterDocumentVersionDownload(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly authorizationContext: AuthorizationContext }): Promise<AuthorizedDocumentDownload> {
+  const documentId = await withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('document_versions').select('document_id').where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).executeTakeFirst();
+    return row?.document_id;
+  });
+  if (documentId === undefined) throw new Error('Document not found');
+  return authorizeMatterDocumentDownload(database, { institutionId: input.institutionId, documentId, versionId: input.versionId, authorizationContext: input.authorizationContext });
 }
 
 export async function recordMalwareScanResultAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly versionId: string; readonly scanId: string; readonly result: 'CLEAN' | 'INFECTED' | 'SCAN_FAILED'; readonly engine: string; readonly engineVersion?: string; readonly signatureVersion?: string; readonly scannedAt?: Date; readonly error?: string; readonly correlationId: string; }): Promise<void> {

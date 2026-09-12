@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { installAuthentication, type AuthenticateRequest } from './auth-plugin.js';
 import { installMatterRoutes, type MatterApplicationService, MatterHttpError } from './matters.js';
+import { installDocumentRoutes, type DocumentApplicationDependencies, DocumentHttpError } from './documents.js';
 
 export interface AppDependencies {
   readonly authenticateAccessToken: AuthenticateRequest;
@@ -11,6 +12,7 @@ export interface AppDependencies {
   readonly checkDatabase: () => Promise<boolean>;
   readonly version: string;
   readonly webOrigin: string;
+  readonly documentDependencies?: Omit<DocumentApplicationDependencies, 'authenticate'>;
 }
 
 export async function createApp(dependencies: AppDependencies): Promise<FastifyInstance> {
@@ -19,7 +21,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
 
   await app.register(cors, { origin: dependencies.webOrigin });
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof MatterHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof MatterHttpError || error instanceof DocumentHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if ((error as { readonly code?: unknown }).code === 'FST_ERR_VALIDATION') return reply.code(400).send({ error: { code: 'INVALID_REQUEST', message: 'Request validation failed' } });
     request.log.error(error);
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
@@ -63,6 +65,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   );
 
   if (dependencies.matterService !== undefined) installMatterRoutes(app, dependencies.matterService, dependencies.authenticateAccessToken);
+  if (dependencies.documentDependencies !== undefined) await installDocumentRoutes(app, { ...dependencies.documentDependencies, authenticate: dependencies.authenticateAccessToken });
 
   return app;
 }

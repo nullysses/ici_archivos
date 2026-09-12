@@ -5,6 +5,7 @@ import { addMatterNoteAtomically, applyFoundationMigrations, assignMatterAtomica
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createMatterApplicationService } from './matters.js';
+import type { DocumentStoragePort } from '@ici/integration-storage';
 
 const institutionA = '11000000-0000-4000-8000-000000000001';
 const institutionB = '11000000-0000-4000-8000-000000000002';
@@ -22,6 +23,14 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
   let database: Database | undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   let currentPrincipal: AuthenticatedPrincipal;
+  const objects = new Map<string, Uint8Array>();
+  const storage: DocumentStoragePort = {
+    async put(input) { const reader = input.body.getReader(); const chunks: Uint8Array[] = []; while (true) { const next = await reader.read(); if (next.done) break; chunks.push(next.value); } const total = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)); let offset = 0; for (const chunk of chunks) { total.set(chunk, offset); offset += chunk.byteLength; } objects.set(`${input.zone}:${input.key}`, total); },
+    open(input) { const value = objects.get(`${input.zone}:${input.key}`); if (value === undefined) return Promise.reject(new Error('missing object')); return Promise.resolve(new ReadableStream({ start(controller) { controller.enqueue(value); controller.close(); } })); },
+    head(input) { const value = objects.get(`${input.zone}:${input.key}`); return Promise.resolve(value === undefined ? undefined : { sizeBytes: BigInt(value.byteLength) }); },
+    copy() { return Promise.reject(new Error('not used')); },
+    remove(input) { objects.delete(`${input.zone}:${input.key}`); return Promise.resolve(); },
+  };
 
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
@@ -56,6 +65,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
       checkDatabase: () => Promise.resolve(true),
       version: 'test',
       webOrigin: 'http://localhost',
+      documentDependencies: { database, storage },
     });
   }, 120_000);
 
@@ -116,6 +126,22 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     await db().insertInto('matters').values({ id: legacyId, institution_id: institutionA, folio: 'OP-2026-000004', folio_year: 2026, sequence_number: 4, status: 'RECEIVED', received_at: new Date(now), intake_metadata: { sender: 'legacy', subject: 'legacy', description: 'legacy', priority: 'NORMAL', channel: 'EMAIL' }, destination_unit_id: unitA, access_classification_id: classificationA, created_by: userA }).execute();
     const legacyRead = await api().inject({ method: 'GET', url: `/matters/${legacyId}`, headers: { authorization: 'Bearer test' } });
     expect(legacyRead.statusCode).toBe(403);
+  });
+
+  it('accepts a streamed matter document into quarantine and lists its metadata', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'records.read', 'document.version_open']), unitCapabilities: new Map() } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2040-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    const boundary = 'ici-test-boundary';
+    const body = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="documentType"\r\n\r\nofficial\r\n--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nEvidence\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="evidence.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7 test\r\n--${boundary}--\r\n`);
+    const uploaded = await api().inject({ method: 'POST', url: `/matters/${matterId}/documents`, headers: { authorization: 'Bearer test', 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: body });
+    expect(uploaded.statusCode).toBe(202);
+    const uploadedBody = uploaded.json<{ document: { id: string }; version: { malwareScanStatus: string; detectedMimeType: string } }>();
+    expect(uploadedBody.version).toMatchObject({ malwareScanStatus: 'PENDING_SCAN', detectedMimeType: 'application/pdf' });
+    expect(objects.size).toBe(1);
+    const listed = await api().inject({ method: 'GET', url: `/matters/${matterId}/documents`, headers: { authorization: 'Bearer test' } });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json<{ items: unknown[] }>().items).toHaveLength(1);
   });
 
   it('rolls back matter, folio, state event, and audit on transactional failure', async () => {

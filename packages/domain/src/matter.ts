@@ -105,6 +105,7 @@ export function resolveMatter(matter: Matter, resolutionMetadata: JsonObject, re
 }
 
 export function linkMatterToExpediente(matter: Matter, expediente: Pick<Expediente, 'id' | 'institutionId' | 'state'>, linkedAt: Date): DomainMutation<Matter> {
+  if (matter.linkedExpedienteId !== undefined) throw new DomainInvariantError('MATTER_ALREADY_LINKED', 'Matter is already linked to an expediente');
   if (matter.state === 'CLOSED' || matter.state === 'VOIDED') invalidTransition('matter', matter.state, 'linkMatterToExpediente');
   if (matter.institutionId !== expediente.institutionId) throw new DomainInvariantError('CROSS_TENANT_REFERENCE', 'Matter and expediente must belong to the same institution');
   if (expediente.state !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'A matter can only be linked to an open expediente');

@@ -6,6 +6,7 @@ import {
   MatterFolioParamsSchema,
   MatterIdParamsSchema,
   MatterInboxResponseSchema,
+  MatterLinkExpedienteRequestSchema,
   MatterNoteRequestSchema,
   MatterNoteSchema,
   MatterNotesResponseSchema,
@@ -16,6 +17,7 @@ import {
   MatterVoidRequestSchema,
   type MatterAssignmentRequest,
   type MatterInboxResponse,
+  type MatterLinkExpedienteRequest,
   type MatterNoteRequest,
   type MatterNotesResponse,
   type MatterResolveRequest,
@@ -32,6 +34,7 @@ import {
   findMatterById,
   findMatterInbox,
   findMatterNotesAuthorized,
+  linkMatterToExpedienteAtomically,
   persistMatterTransition,
   type JsonObject,
   registerMatterAtomically,
@@ -45,7 +48,7 @@ import type { AuthenticatedPrincipal } from './auth.js';
 import { createAuthenticationGuard } from './auth-plugin.js';
 
 export class MatterHttpError extends Error {
-  public constructor(readonly statusCode: 400 | 403 | 404, readonly code: 'INVALID_REQUEST' | 'INVALID_TRANSITION' | 'FORBIDDEN' | 'MATTER_NOT_FOUND', message: string) {
+  public constructor(readonly statusCode: 400 | 403 | 404 | 409, readonly code: 'INVALID_REQUEST' | 'INVALID_TRANSITION' | 'FORBIDDEN' | 'MATTER_NOT_FOUND' | 'MATTER_ALREADY_LINKED', message: string) {
     super(message);
     this.name = 'MatterHttpError';
   }
@@ -99,6 +102,14 @@ export interface MatterApplicationService {
     readonly request: MatterNoteRequest;
     readonly authorization: AuthenticatedPrincipal['authorization'];
   }): Promise<MatterNoteReadModel>;
+  linkExpediente(input: {
+    readonly institutionId: string;
+    readonly actorUserId: string;
+    readonly correlationId: string;
+    readonly matterId: string;
+    readonly expedienteId: string;
+    readonly authorization: AuthenticatedPrincipal['authorization'];
+  }): Promise<MatterReadModel>;
 }
 
 export function createMatterApplicationService(database: Database): MatterApplicationService {
@@ -229,6 +240,29 @@ export function createMatterApplicationService(database: Database): MatterApplic
         authorizationContext: input.authorization,
       });
     },
+    async linkExpediente(input) {
+      try {
+        await linkMatterToExpedienteAtomically(database, {
+          institutionId: input.institutionId,
+          matterId: input.matterId,
+          expedienteId: input.expedienteId,
+          actorUserId: input.actorUserId,
+          correlationId: input.correlationId,
+          authorizationContext: input.authorization,
+        });
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
+        if (code === 'MATTER_ALREADY_LINKED') throw new MatterHttpError(409, 'MATTER_ALREADY_LINKED', 'Matter is already linked to an expediente');
+        if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+        if (code === 'INVALID_TRANSITION') throw new MatterHttpError(400, 'INVALID_TRANSITION', 'Matter cannot be linked in its current state');
+        if (code === 'EXPEDIENTE_NOT_OPEN') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Expediente cannot be linked');
+        if (error instanceof Error && error.message === 'Matter not found') throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
+        throw error;
+      }
+      const linked = await findMatterById(database, input.institutionId, input.matterId);
+      if (linked === undefined) throw new Error('Matter linkage did not produce a matter');
+      return linked;
+    },
   };
 }
 
@@ -251,6 +285,7 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
   } as const;
   const assignmentResponseSchemas = { 200: MatterResponseSchema, 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } as const;
   const transitionResponseSchemas = { 200: MatterResponseSchema, 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } as const;
+  const linkResponseSchemas = { 200: MatterResponseSchema, 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema, 409: MatterErrorSchema } as const;
 
   app.post<{ Body: MatterRegistrationRequest; Reply: MatterResponse }>(
     '/matters',
@@ -322,6 +357,29 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     transition('voidMatter'),
   );
 
+  app.post<{ Params: { id: string }; Body: MatterLinkExpedienteRequest; Reply: MatterResponse }>(
+    '/matters/:id/link-expediente',
+    { preHandler, preValidation: (request, _reply, done) => {
+      try {
+        rejectLinkUnknownFields(request.body);
+        done();
+      } catch (error: unknown) {
+        done(error instanceof Error ? error : new Error('Request validation failed'));
+      }
+    }, schema: { params: MatterIdParamsSchema, body: MatterLinkExpedienteRequestSchema, response: linkResponseSchemas } },
+    async (request, reply) => {
+      const linked = await service.linkExpediente({
+        institutionId: request.principal.institutionId,
+        actorUserId: request.principal.userId,
+        correlationId: request.id,
+        matterId: request.params.id,
+        expedienteId: request.body.expedienteId,
+        authorization: request.principal.authorization,
+      });
+      return reply.code(200).send(toMatterResponse(linked));
+    },
+  );
+
   const notesResponseSchemas = { 200: MatterNotesResponseSchema, 201: MatterNoteSchema, 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } as const;
   app.get<{ Params: { id: string }; Reply: MatterNotesResponse }>(
     '/matters/:id/notes',
@@ -381,6 +439,11 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     { preHandler, schema: { params: MatterIdParamsSchema, response: responseSchemas } },
     (request, reply) => readMatter(request, reply, service.byId(request.principal.institutionId, request.params.id)),
   );
+}
+
+function rejectLinkUnknownFields(body: unknown): void {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return;
+  if (Object.keys(body).some((field) => field !== 'expedienteId')) throw new MatterHttpError(400, 'INVALID_REQUEST', 'Request validation failed');
 }
 
 function toMatterResponse(matter: MatterReadModel): MatterResponse {

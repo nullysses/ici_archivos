@@ -132,6 +132,7 @@ describe('matter lifecycle commands', () => {
     expect(() => reopenMatter(resolvedMatter(), 'Review', openExpediente(), now)).toThrow(/linked expediente/i);
     const linked = linkMatterToExpediente(resolvedMatter(), openExpediente(), now).aggregate;
     const closed = closeMatter(linked, { closedBy: user }, now).aggregate;
+    expect(() => linkMatterToExpediente(linked, openExpediente(), now)).toThrow(/already linked/i);
     expect(() => assignMatter(closed, { assignmentId: entityId('00000000-0000-4000-8000-000000000031'), unitId: unit, assignedAt: now })).toThrow(/not allowed/i);
   });
 });

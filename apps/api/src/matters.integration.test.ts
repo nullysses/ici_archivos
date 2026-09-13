@@ -225,6 +225,29 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect(sourceAndTargetAllowed.json<{ destinationUnitId: string; status: string }>()).toMatchObject({ destinationUnitId: unitA, status: 'ASSIGNED' });
   });
 
+  it('links an unlinked matter to one open expediente atomically and rejects repeats', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'records.read', 'expediente.edit_open']), unitCapabilities: new Map() } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2035-09-11T12:00:00.000Z' } });
+    expect(created.statusCode).toBe(201);
+    const matterId = created.json<{ id: string }>().id;
+    const expedienteTypeId = '11000000-0000-4000-8000-000000000062';
+    const expedienteTypeVersionId = '11000000-0000-4000-8000-000000000061';
+    await db().insertInto('expediente_types').values({ id: expedienteTypeId, institution_id: institutionA, code: 'LINK-TEST', name: 'Link test', status: 'ACTIVE' }).execute();
+    await db().insertInto('expediente_type_versions').values({ id: expedienteTypeVersionId, institution_id: institutionA, expediente_type_id: expedienteTypeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object' }, archival_mapping_json: {}, created_at: new Date('2035-09-11T12:00:00.000Z'), published_at: new Date('2035-09-11T12:00:00.000Z') }).execute();
+    const expedienteId = '11000000-0000-4000-8000-000000000060';
+    await db().insertInto('expedientes').values({ id: expedienteId, institution_id: institutionA, folio: 'EXP-2035-000001', folio_year: 2035, sequence_number: 1, status: 'OPEN', expediente_type_version_id: '11000000-0000-4000-8000-000000000061', metadata: {}, opened_at: new Date('2035-09-11T12:00:00.000Z') }).execute();
+    const linked = await api().inject({ method: 'POST', url: `/matters/${matterId}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId } });
+    expect(linked.statusCode).toBe(200);
+    expect(linked.json<{ linkedExpedienteId: string; status: string }>().linkedExpedienteId).toBe(expedienteId);
+    expect(linked.json<{ status: string }>().status).toBe('RECEIVED');
+    expect((await db().selectFrom('matter_state_events').selectAll().where('matter_id', '=', matterId).execute())).toHaveLength(1);
+    expect((await db().selectFrom('audit_events').selectAll().where('aggregate_id', '=', matterId).where('event_type', '=', 'matter.linked_to_expediente').execute())).toHaveLength(1);
+    const repeated = await api().inject({ method: 'POST', url: `/matters/${matterId}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId } });
+    expect(repeated.statusCode).toBe(409);
+    expect(repeated.json()).toEqual({ error: { code: 'MATTER_ALREADY_LINKED', message: 'Matter is already linked to an expediente' } });
+    expect((await db().selectFrom('audit_events').selectAll().where('aggregate_id', '=', matterId).where('event_type', '=', 'matter.linked_to_expediente').execute())).toHaveLength(1);
+  });
+
   it('rejects assignment outside the principal capability scope', async () => {
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map([[unitA, new Set(['records.read'])]]) } };
     const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2028-09-11T12:00:00.000Z' } });

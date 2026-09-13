@@ -451,14 +451,21 @@ export async function persistMatterTransition(database: Database, input: StateTr
   });
 }
 
-export async function linkMatterToExpedienteAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly matterId: string; readonly expedienteId: string; readonly actorUserId?: string; readonly correlationId: string }): Promise<void> {
-  await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'matter.linked_to_expediente', aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, afterData: { expedienteId: input.expedienteId } }, async (transaction) => {
-    const matter = await transaction.selectFrom('matters').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forUpdate().executeTakeFirst();
+export async function linkMatterToExpedienteAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly matterId: string; readonly expedienteId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorizationContext: AuthorizationContext }): Promise<void> {
+  await withTenantContextTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, correlationId: input.correlationId }, async (transaction) => {
+    const matter = await transaction.selectFrom('matters').select(['status', 'linked_expediente_id', 'destination_unit_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forUpdate().executeTakeFirst();
     if (matter === undefined) throw new Error('Matter not found');
+    if (matter.linked_expediente_id !== null) throw new DomainInvariantError('MATTER_ALREADY_LINKED', 'Matter is already linked to an expediente');
     if (matter.status === 'CLOSED' || matter.status === 'VOIDED') throw new DomainInvariantError('INVALID_TRANSITION', `linkMatterToExpediente is not allowed from ${matter.status}`);
-    const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).executeTakeFirst();
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Link authorization context does not match the actor and institution');
+    const effectiveUnit = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, matter.destination_unit_id);
+    if (!canPerform(input.authorizationContext, 'expediente.edit_open', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot edit open expedientes for the effective matter unit');
+    const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forShare().executeTakeFirst();
     if (expediente?.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'A matter can only be linked to an open expediente');
-    await transaction.updateTable('matters').set({ linked_expediente_id: input.expedienteId, updated_at: new Date() }).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).execute();
+    const linkedAt = (await sql<{ linked_at: Date }>`select clock_timestamp() as linked_at`.execute(transaction)).rows[0]?.linked_at;
+    if (linkedAt === undefined) throw new Error('Link timestamp was not generated');
+    await transaction.updateTable('matters').set({ linked_expediente_id: input.expedienteId, updated_at: linkedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).execute();
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'matter.linked_to_expediente', aggregateType: 'matter', aggregateId: input.matterId, correlationId: input.correlationId, beforeData: { linkedExpedienteId: null }, afterData: { linkedExpedienteId: input.expedienteId }, eventData: { expedienteId: input.expedienteId } });
   });
 }
 

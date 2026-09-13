@@ -68,6 +68,11 @@ export const MatterAssignmentRequestSchema = Type.Object({
 }, { additionalProperties: false, $id: 'MatterAssignmentRequest' });
 export type MatterAssignmentRequest = Static<typeof MatterAssignmentRequestSchema>;
 
+export const MatterLinkExpedienteRequestSchema = Type.Object({
+  expedienteId: Uuid,
+}, { additionalProperties: false, $id: 'MatterLinkExpedienteRequest' });
+export type MatterLinkExpedienteRequest = Static<typeof MatterLinkExpedienteRequestSchema>;
+
 export const MatterInboxItemSchema = Type.Intersect([
   MatterResponseSchema,
   Type.Object({

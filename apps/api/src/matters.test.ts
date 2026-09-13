@@ -48,6 +48,7 @@ function serviceFixture(): MatterApplicationService {
     transition: () => Promise.resolve(matter),
     listNotes: () => Promise.resolve([]),
     addNote: () => Promise.resolve(note),
+    linkExpediente: () => Promise.resolve(matter),
   };
 }
 
@@ -186,5 +187,27 @@ describe('matter registration and read routes', () => {
     const response = await app.inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' } });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ items: [{ id: note.id, matterId, authorUserId: userId, noteType: 'NOTE', content: 'Note', createdAt: note.created_at.toISOString() }] });
+  });
+
+  it('exposes the one-time expediente linkage contract and server authorization inputs', async () => {
+    const targetExpedienteId = '10000000-0000-4000-8000-000000000099';
+    const base = serviceFixture();
+    let received: unknown;
+    const service: MatterApplicationService = {
+      ...base,
+      linkExpediente: (input) => {
+        received = input;
+        return Promise.resolve({ ...matter, linked_expediente_id: targetExpedienteId });
+      },
+    };
+    currentPrincipal = principal({ userId, institutionId, institutionCapabilities: new Set(['expediente.edit_open']), unitCapabilities: new Map() });
+    app = await createTestApp(service);
+    const response = await app.inject({ method: 'POST', url: `/matters/${matterId}/link-expediente`, headers: { authorization: 'Bearer token' }, payload: { expedienteId: targetExpedienteId, institutionId } });
+    expect(response.statusCode).toBe(400);
+    expect(received).toBeUndefined();
+    const linked = await app.inject({ method: 'POST', url: `/matters/${matterId}/link-expediente`, headers: { authorization: 'Bearer token' }, payload: { expedienteId: targetExpedienteId } });
+    expect(linked.statusCode).toBe(200);
+    expect(linked.json<{ linkedExpedienteId: string }>().linkedExpedienteId).toBe(targetExpedienteId);
+    expect(received).toMatchObject({ institutionId, actorUserId: userId, matterId, expedienteId: targetExpedienteId, authorization: currentPrincipal.authorization });
   });
 });

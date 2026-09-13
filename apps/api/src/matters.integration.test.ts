@@ -249,6 +249,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
   });
 
   it('enforces effective-unit provenance and serializes competing linkage attempts', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map() } };
     const createExpediente = async (id: string, folio: string) => db().insertInto('expedientes').values({ id, institution_id: institutionA, folio, folio_year: 2050, sequence_number: Number(folio.slice(-1)), status: 'OPEN', expediente_type_version_id: '11000000-0000-4000-8000-000000000061', metadata: {}, opened_at: new Date('2050-09-11T12:00:00.000Z') }).execute();
     const createMatter = async (receivedAt: string) => {
       const response = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt } });
@@ -264,6 +265,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA, new Set(['expediente.edit_open'])]]) } };
     expect((await api().inject({ method: 'POST', url: `/matters/${scopedMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: scopedExpediente } })).statusCode).toBe(200);
 
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map() } };
     const reassignedMatter = await createMatter('2051-09-11T12:00:00.000Z');
     await assignMatterAtomically(db(), { institutionId: institutionA, matterId: reassignedMatter, assignmentId: '11000000-0000-4000-8000-000000000064', unitId: unitA2, actorUserId: userA, correlationId: 'link-effective-unit', command: 'assignMatter', fromStatus: 'RECEIVED', authorizationContext: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.assign']), unitCapabilities: new Map([[unitA, new Set(['matter.assign'])], [unitA2, new Set(['matter.assign'])]]) } });
     const reassignedExpediente = '11000000-0000-4000-8000-000000000065';
@@ -273,6 +275,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(), unitCapabilities: new Map([[unitA2, new Set(['expediente.edit_open'])]]) } };
     expect((await api().inject({ method: 'POST', url: `/matters/${reassignedMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: reassignedExpediente } })).statusCode).toBe(200);
 
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map() } };
     const concurrentMatter = await createMatter('2052-09-11T12:00:00.000Z');
     const concurrentExpedienteA = '11000000-0000-4000-8000-000000000066';
     const concurrentExpedienteB = '11000000-0000-4000-8000-000000000067';

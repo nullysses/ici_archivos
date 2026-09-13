@@ -12,12 +12,15 @@ import {
   DocumentErrorSchema, DocumentIdParamsSchema, DocumentUploadResponseSchema,
   DocumentVersionContentParamsSchema,
   DocumentVersionsResponseSchema, MatterDocumentParamsSchema, MatterDocumentsResponseSchema,
+  ExpedienteDocumentParamsSchema, ExpedienteDocumentsResponseSchema,
   type DocumentResponse, type DocumentVersionResponse,
 } from '@ici/contracts';
 import {
   acceptMatterDocumentUploadAtomically, acceptMatterDocumentVersionUploadAtomically,
-  authorizeMatterDocumentVersionDownload, authorizeMatterDocumentUploadPreflight,
-  findMatterDocumentVersions, findMatterDocumentVersionsAuthorized, findMatterDocumentsAuthorized, type Database,
+  acceptExpedienteDocumentUploadAtomically, acceptExpedienteDocumentVersionUploadAtomically,
+  authorizeMatterDocumentUploadPreflight,
+  authorizeExpedienteDocumentUploadPreflight, authorizeDocumentVersionUploadPreflight, authorizeDocumentVersionDownload,
+  findMatterDocumentsAuthorized, findExpedienteDocumentsAuthorized, findDocumentVersionsAuthorized, findDocumentVersions, type Database,
 } from '@ici/database';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createAuthenticationGuard, type AuthenticateRequest } from './auth-plugin.js';
@@ -89,9 +92,35 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
     return reply.code(202).send({ document: toDocumentResponse({ document: accepted.document, versions: [accepted.version] }), version: toVersionResponse(accepted.version) });
   });
 
+  app.post<{ Params: { expedienteId: string } }>('/expedientes/:expedienteId/documents', { preHandler, schema: { params: ExpedienteDocumentParamsSchema, response: { 202: DocumentUploadResponseSchema, ...errors } } }, async (request, reply) => {
+    const principal = request.principal;
+    const versionId = randomUUID();
+    const storageKey = documentStorageKey(principal.institutionId, versionId);
+    let fields: { documentType?: string; title?: string; replacementReason?: string; accessClassificationId?: string } = {};
+    let parsed;
+    let committed = false;
+    try {
+      parsed = await processUpload(request, configuredDependencies, storageKey, async (currentFields) => {
+        fields = currentFields;
+        if (fields.documentType === undefined || fields.title === undefined || fields.accessClassificationId === undefined || fields.replacementReason !== undefined) throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Expediente document metadata is invalid');
+        await authorizeExpedienteDocumentUploadPreflight(dependencies.database, { institutionId: principal.institutionId, expedienteId: request.params.expedienteId, accessClassificationId: fields.accessClassificationId, authorizationContext: principal.authorization, actorUserId: principal.userId });
+      });
+      fields = parsed.fields;
+      if (fields.documentType === undefined || fields.title === undefined || fields.accessClassificationId === undefined || fields.replacementReason !== undefined) { await safeRemove(dependencies.storage, storageKey); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Expediente document metadata is invalid'); }
+      const accepted = await acceptExpedienteDocumentUploadAtomically(dependencies.database, { documentId: randomUUID(), versionId, institutionId: principal.institutionId, expedienteId: request.params.expedienteId, documentType: fields.documentType, title: fields.title, accessClassificationId: fields.accessClassificationId, originalFilename: parsed.upload.filename, detectedMimeType: parsed.upload.detectedMimeType, ...(parsed.upload.declaredMimeType === undefined ? {} : { declaredMimeType: parsed.upload.declaredMimeType }), sizeBytes: parsed.upload.sizeBytes, sha256: parsed.upload.sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: principal.userId, correlationId: request.id, authorizationContext: principal.authorization });
+      committed = true;
+      return reply.code(202).send({ document: toDocumentResponse({ document: accepted.document, versions: [accepted.version] }), version: toVersionResponse(accepted.version) });
+    } catch (error) {
+      // Cleanup is only performed before acceptance succeeds. Once acceptance returns, the object is durable evidence.
+      if (!committed) await safeRemove(dependencies.storage, storageKey);
+      throw mapDocumentError(error);
+    }
+  });
+
   app.post<{ Params: { documentId: string } }>('/documents/:documentId/versions', { preHandler, schema: { params: DocumentIdParamsSchema, response: { 202: DocumentUploadResponseSchema, ...errors } } }, async (request, reply) => {
     const principal = request.principal;
-    try { await authorizeMatterDocumentUploadPreflight(dependencies.database, { institutionId: principal.institutionId, documentId: request.params.documentId, authorizationContext: principal.authorization, actorUserId: principal.userId }); } catch (error) { throw mapDocumentError(error); }
+    let owner;
+    try { owner = await authorizeDocumentVersionUploadPreflight(dependencies.database, { institutionId: principal.institutionId, documentId: request.params.documentId, authorizationContext: principal.authorization, actorUserId: principal.userId }); } catch (error) { throw mapDocumentError(error); }
     const versionId = randomUUID();
     const storageKey = documentStorageKey(principal.institutionId, versionId);
     let parsed;
@@ -101,7 +130,12 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
     const upload = parsed.upload;
     let accepted;
     try {
-      accepted = await acceptMatterDocumentVersionUploadAtomically(dependencies.database, {
+      accepted = owner === 'MATTER' ? await acceptMatterDocumentVersionUploadAtomically(dependencies.database, {
+        documentId: request.params.documentId, versionId, institutionId: principal.institutionId, originalFilename: upload.filename,
+        detectedMimeType: upload.detectedMimeType, ...(upload.declaredMimeType === undefined ? {} : { declaredMimeType: upload.declaredMimeType }),
+        sizeBytes: upload.sizeBytes, sha256: upload.sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: principal.userId,
+        replacementReason: fields.replacementReason, correlationId: request.id, authorizationContext: principal.authorization,
+      }) : await acceptExpedienteDocumentVersionUploadAtomically(dependencies.database, {
         documentId: request.params.documentId, versionId, institutionId: principal.institutionId, originalFilename: upload.filename,
         detectedMimeType: upload.detectedMimeType, ...(upload.declaredMimeType === undefined ? {} : { declaredMimeType: upload.declaredMimeType }),
         sizeBytes: upload.sizeBytes, sha256: upload.sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: principal.userId,
@@ -111,7 +145,7 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
       await safeRemove(dependencies.storage, storageKey);
       throw mapDocumentError(error);
     }
-    const model = await findMatterDocumentVersions(dependencies.database, principal.institutionId, request.params.documentId);
+    const model = await findDocumentVersions(dependencies.database, principal.institutionId, request.params.documentId);
     if (model === undefined) throw new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
     return reply.code(202).send({ document: toDocumentResponse(model), version: toVersionResponse(accepted.version) });
   });
@@ -124,9 +158,17 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
     return { items: models.map(toDocumentResponse) };
   });
 
+  app.get<{ Params: { expedienteId: string } }>('/expedientes/:expedienteId/documents', { preHandler, schema: { params: ExpedienteDocumentParamsSchema, response: { 200: ExpedienteDocumentsResponseSchema, ...errors } } }, async (request) => {
+    try {
+      const models = await findExpedienteDocumentsAuthorized(dependencies.database, { institutionId: request.principal.institutionId, expedienteId: request.params.expedienteId, authorizationContext: request.principal.authorization });
+      if (models === undefined) throw new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Expediente not found');
+      return { items: models.map(toDocumentResponse) };
+    } catch (error) { throw mapDocumentError(error); }
+  });
+
   app.get<{ Params: { documentId: string } }>('/documents/:documentId/versions', { preHandler, schema: { params: DocumentIdParamsSchema, response: { 200: DocumentVersionsResponseSchema, ...errors } } }, async (request) => {
     let model;
-    try { model = await findMatterDocumentVersionsAuthorized(dependencies.database, { institutionId: request.principal.institutionId, documentId: request.params.documentId, authorizationContext: request.principal.authorization }); }
+    try { model = await findDocumentVersionsAuthorized(dependencies.database, { institutionId: request.principal.institutionId, documentId: request.params.documentId, authorizationContext: request.principal.authorization }); }
     catch (error) { throw mapDocumentError(error); }
     if (model === undefined) throw new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
     return { items: model.versions.map(toVersionResponse) };
@@ -147,35 +189,46 @@ export async function installDocumentRoutes(app: FastifyInstance, dependencies: 
   });
 }
 
-async function processUpload(request: FastifyRequest, dependencies: DocumentApplicationDependencies, key: string): Promise<{ fields: { documentType?: string; title?: string; replacementReason?: string }; upload: UploadResult }> {
-  const fields: { documentType?: string; title?: string; replacementReason?: string } = {};
+async function processUpload(request: FastifyRequest, dependencies: DocumentApplicationDependencies, key: string, beforeStorage?: (fields: { documentType?: string; title?: string; replacementReason?: string; accessClassificationId?: string }) => Promise<void>): Promise<{ fields: { documentType?: string; title?: string; replacementReason?: string; accessClassificationId?: string }; upload: UploadResult }> {
+  const fields: { documentType?: string; title?: string; replacementReason?: string; accessClassificationId?: string } = {};
   let upload: UploadResult | undefined;
+  let temporaryDirectory: string | undefined;
+  let temporaryPath: string | undefined;
+  let inspected: Awaited<ReturnType<typeof streamToTemporaryFile>> | undefined;
   for await (const part of request.parts()) {
     if (part.type === 'field') {
-      if (part.fieldname === 'documentType' || part.fieldname === 'title' || part.fieldname === 'replacementReason') {
+      if (part.fieldname === 'documentType' || part.fieldname === 'title' || part.fieldname === 'replacementReason' || part.fieldname === 'accessClassificationId') {
         const value = String(part.value).trim();
-        const limit = part.fieldname === 'documentType' ? 200 : part.fieldname === 'title' ? 1000 : 4000;
-        if (value.length === 0 || value.length > limit) { if (upload !== undefined) await safeRemove(dependencies.storage, key); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Multipart field is invalid'); }
+        const limit = part.fieldname === 'documentType' ? 200 : part.fieldname === 'title' ? 1000 : part.fieldname === 'replacementReason' ? 4000 : 100;
+        if (value.length === 0 || value.length > limit) { if (upload !== undefined) await safeRemove(dependencies.storage, key); if (temporaryDirectory !== undefined) await rm(temporaryDirectory, { recursive: true, force: true }); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Multipart field is invalid'); }
         fields[part.fieldname] = value;
       }
       continue;
     }
-    if (upload !== undefined) { part.file.resume(); await safeRemove(dependencies.storage, key); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required'); }
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), 'ici-document-'));
-    const temporaryPath = join(temporaryDirectory, 'upload.bin');
+    if (upload !== undefined) { part.file.resume(); await safeRemove(dependencies.storage, key); if (temporaryDirectory !== undefined) await rm(temporaryDirectory, { recursive: true, force: true }); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required'); }
+    temporaryDirectory = await mkdtemp(join(tmpdir(), 'ici-document-'));
+    temporaryPath = join(temporaryDirectory, 'upload.bin');
     try {
-      const inspected = await streamToTemporaryFile(part, temporaryPath, dependencies.maxBytes ?? DEFAULT_MAX_BYTES, dependencies.detector);
+      inspected = await streamToTemporaryFile(part, temporaryPath, dependencies.maxBytes ?? DEFAULT_MAX_BYTES, dependencies.detector);
       assertAllowedDetectedMimeType(inspected.detectedMimeType);
-      await dependencies.storage.put({ zone: 'QUARANTINE', key, body: Readable.toWeb(createReadStream(temporaryPath)) as ReadableStream<Uint8Array>, sha256: inspected.sha256 });
       upload = { filename: part.filename, declaredMimeType: part.mimetype === '' ? undefined : part.mimetype, sizeBytes: inspected.sizeBytes.toString(), sha256: inspected.sha256, detectedMimeType: inspected.detectedMimeType };
     } catch (error) {
       await safeRemove(dependencies.storage, key);
-      throw error;
-    } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
+      throw error;
     }
   }
   if (upload === undefined) throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required');
+  try {
+    if (beforeStorage !== undefined) await beforeStorage(fields);
+    if (temporaryPath === undefined || inspected === undefined) throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Exactly one file is required');
+    await dependencies.storage.put({ zone: 'QUARANTINE', key, body: Readable.toWeb(createReadStream(temporaryPath)) as ReadableStream<Uint8Array>, sha256: inspected.sha256 });
+  } catch (error) {
+    await safeRemove(dependencies.storage, key);
+    throw error;
+  } finally {
+    if (temporaryDirectory !== undefined) await rm(temporaryDirectory, { recursive: true, force: true });
+  }
   return { fields, upload };
 }
 
@@ -210,12 +263,13 @@ function toVersionResponse(version: { id: string; document_id: string; version_n
   return { id: version.id, documentId: version.document_id, versionNumber: version.version_number, originalFilename: version.original_filename, detectedMimeType: version.detected_mime_type, declaredMimeType: version.declared_mime_type, sizeBytes: String(version.size_bytes), sha256: version.sha256, malwareScanStatus: version.malware_scan_status, createdBy: version.created_by, createdAt: new Date(version.created_at).toISOString(), replacementReason: version.replacement_reason };
 }
 
-function toDocumentResponse(model: { document: { id: string; matter_id: string | null; document_type: string; title: string; current_version_id: string | null; access_classification_id: string | null; created_at: Date | string; updated_at: Date | string }; versions: readonly Parameters<typeof toVersionResponse>[0][] }): DocumentResponse {
-  return { id: model.document.id, matterId: model.document.matter_id as string, documentType: model.document.document_type, title: model.document.title, currentVersionId: model.document.current_version_id, accessClassificationId: model.document.access_classification_id, createdAt: new Date(model.document.created_at).toISOString(), updatedAt: new Date(model.document.updated_at).toISOString(), versions: model.versions.map(toVersionResponse) };
+function toDocumentResponse(model: { document: { id: string; matter_id: string | null; expediente_id: string | null; document_type: string; title: string; current_version_id: string | null; access_classification_id: string | null; created_at: Date | string; updated_at: Date | string }; versions: readonly Parameters<typeof toVersionResponse>[0][] }): DocumentResponse {
+  if ((model.document.matter_id === null) === (model.document.expediente_id === null)) throw new Error('Invalid document parent invariant');
+  return { id: model.document.id, matterId: model.document.matter_id, expedienteId: model.document.expediente_id, documentType: model.document.document_type, title: model.document.title, currentVersionId: model.document.current_version_id, accessClassificationId: model.document.access_classification_id, createdAt: new Date(model.document.created_at).toISOString(), updatedAt: new Date(model.document.updated_at).toISOString(), versions: model.versions.map(toVersionResponse) };
 }
 
 async function findVersionDocument(database: Database, principal: AuthenticatedPrincipal, versionId: string): Promise<{ storageKey: string; originalFilename: string; detectedMimeType: string; sizeBytes: string }> {
-  const result = await authorizeMatterDocumentVersionDownload(database, { institutionId: principal.institutionId, versionId, authorizationContext: principal.authorization });
+  const result = await authorizeDocumentVersionDownload(database, { institutionId: principal.institutionId, versionId, authorizationContext: principal.authorization });
   return { storageKey: result.storageKey, originalFilename: result.originalFilename, detectedMimeType: result.detectedMimeType, sizeBytes: result.sizeBytes };
 }
 
@@ -225,8 +279,10 @@ function mapDocumentError(error: unknown): Error {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new DocumentHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'DOCUMENT_NOT_AVAILABLE') return new DocumentHttpError(409, 'DOCUMENT_NOT_AVAILABLE', 'Document is not available');
-  if (code === 'MATTER_NOT_OPEN' || code === 'ACCESS_CLASSIFICATION_REQUIRED' || code === 'ACCESS_CLASSIFICATION_NOT_FOUND' || code === 'INCONSISTENT_ACCESS_CLASSIFICATION') return new DocumentHttpError(409, 'DOCUMENT_STATE_CONFLICT', 'Matter state changed during document intake');
+  if (code === 'MATTER_NOT_OPEN' || code === 'EXPEDIENTE_NOT_OPEN') return new DocumentHttpError(409, 'DOCUMENT_STATE_CONFLICT', 'Parent state changed during document intake');
+  if (code === 'ACCESS_CLASSIFICATION_REQUIRED' || code === 'ACCESS_CLASSIFICATION_NOT_FOUND' || code === 'INCONSISTENT_ACCESS_CLASSIFICATION') return new DocumentHttpError(400, 'INVALID_REQUEST', 'Access classification is invalid');
   if (code === 'DOCUMENT_NOT_FOUND' || (error instanceof Error && error.message === 'Document not found')) return new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Document not found');
+  if (code === 'EXPEDIENTE_NOT_FOUND' || (error instanceof Error && error.message === 'Expediente not found')) return new DocumentHttpError(404, 'DOCUMENT_NOT_FOUND', 'Expediente not found');
   if (code === 'MATTER_NOT_FOUND' || (error instanceof Error && error.message === 'Matter not found')) return new DocumentHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
   if (code === 'INVALID_DOCUMENT_METADATA' || code === 'REPLACEMENT_REASON_REQUIRED' || code === 'INVALID_SIZE' || code === 'INVALID_SHA256') return new DocumentHttpError(400, 'INVALID_REQUEST', 'Document metadata is invalid');
   if (error instanceof UnsupportedDocumentMimeError) return new DocumentHttpError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Document media type is not supported');

@@ -6,6 +6,7 @@ const ErrorSchema = Type.Object({ error: Type.Object({ code: Type.String(), mess
 
 export const DocumentIdParamsSchema = Type.Object({ documentId: Uuid }, { additionalProperties: false, $id: 'DocumentIdParams' });
 export const MatterDocumentParamsSchema = Type.Object({ matterId: Uuid }, { additionalProperties: false, $id: 'MatterDocumentParams' });
+export const ExpedienteDocumentParamsSchema = Type.Object({ expedienteId: Uuid }, { additionalProperties: false, $id: 'ExpedienteDocumentParams' });
 export const DocumentVersionContentParamsSchema = Type.Object({ versionId: Uuid }, { additionalProperties: false, $id: 'DocumentVersionContentParams' });
 
 export const DocumentUploadFieldsSchema = Type.Object({
@@ -13,6 +14,13 @@ export const DocumentUploadFieldsSchema = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 1000 }),
 }, { additionalProperties: false, $id: 'DocumentUploadFields' });
 export type DocumentUploadFields = Static<typeof DocumentUploadFieldsSchema>;
+
+export const ExpedienteDocumentUploadFieldsSchema = Type.Object({
+  documentType: Type.String({ minLength: 1, maxLength: 200 }),
+  title: Type.String({ minLength: 1, maxLength: 1000 }),
+  accessClassificationId: Uuid,
+}, { additionalProperties: false, $id: 'ExpedienteDocumentUploadFields' });
+export type ExpedienteDocumentUploadFields = Static<typeof ExpedienteDocumentUploadFieldsSchema>;
 
 export const DocumentVersionUploadFieldsSchema = Type.Object({ replacementReason: Type.String({ minLength: 1, maxLength: 4000 }) }, { additionalProperties: false, $id: 'DocumentVersionUploadFields' });
 export type DocumentVersionUploadFields = Static<typeof DocumentVersionUploadFieldsSchema>;
@@ -35,7 +43,8 @@ export type DocumentVersionResponse = Static<typeof DocumentVersionResponseSchem
 
 export const DocumentResponseSchema = Type.Object({
   id: Uuid,
-  matterId: Uuid,
+  matterId: Type.Union([Uuid, Type.Null()]),
+  expedienteId: Type.Union([Uuid, Type.Null()]),
   documentType: Type.String(),
   title: Type.String(),
   currentVersionId: Type.Union([Uuid, Type.Null()]),
@@ -48,6 +57,8 @@ export type DocumentResponse = Static<typeof DocumentResponseSchema>;
 
 export const MatterDocumentsResponseSchema = Type.Object({ items: Type.Array(DocumentResponseSchema) }, { additionalProperties: false, $id: 'MatterDocumentsResponse' });
 export type MatterDocumentsResponse = Static<typeof MatterDocumentsResponseSchema>;
+export const ExpedienteDocumentsResponseSchema = Type.Object({ items: Type.Array(DocumentResponseSchema) }, { additionalProperties: false, $id: 'ExpedienteDocumentsResponse' });
+export type ExpedienteDocumentsResponse = Static<typeof ExpedienteDocumentsResponseSchema>;
 export const DocumentVersionsResponseSchema = Type.Object({ items: Type.Array(DocumentVersionResponseSchema) }, { additionalProperties: false, $id: 'DocumentVersionsResponse' });
 export type DocumentVersionsResponse = Static<typeof DocumentVersionsResponseSchema>;
 export const DocumentUploadResponseSchema = Type.Object({ document: DocumentResponseSchema, version: DocumentVersionResponseSchema }, { additionalProperties: false, $id: 'DocumentUploadResponse' });

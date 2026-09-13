@@ -218,6 +218,16 @@ export async function findMatterDocumentVersions(database: Database, institution
   });
 }
 
+/** Tenant-scoped internal reload used after a successful mutation. */
+export async function findDocumentVersions(database: Database, institutionId: InstitutionId | string, documentId: string): Promise<MatterDocumentReadModel | undefined> {
+  return withTenantTransaction(database, institutionId, async (transaction) => {
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', institutionId).where('id', '=', documentId).executeTakeFirst();
+    if (document === undefined) return undefined;
+    const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', institutionId).where('document_id', '=', documentId).orderBy('version_number').execute();
+    return { document, versions };
+  });
+}
+
 export async function findMatterDocumentVersionsAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly documentId: string; readonly authorizationContext: AuthorizationContext }): Promise<MatterDocumentReadModel | undefined> {
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
     const row = await transaction.selectFrom('documents as d').innerJoin('matters as m', (join) => join.onRef('m.id', '=', 'd.matter_id').onRef('m.institution_id', '=', 'd.institution_id')).select(['d.id', 'd.matter_id', 'd.expediente_id', 'm.destination_unit_id', 'm.intake_metadata']).where('d.institution_id', '=', input.institutionId).where('d.id', '=', input.documentId).where('d.matter_id', 'is not', null).where('d.expediente_id', 'is', null).forShare().executeTakeFirst();
@@ -230,6 +240,79 @@ export async function findMatterDocumentVersionsAuthorized(database: Database, i
     const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('document_id', '=', input.documentId).orderBy('version_number').execute();
     return { document, versions };
   });
+}
+
+/** Institution-scoped read model for documents owned directly by an expediente. */
+export async function findExpedienteDocumentsAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly expedienteId: string; readonly authorizationContext: AuthorizationContext }): Promise<readonly MatterDocumentReadModel[] | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const expediente = await transaction.selectFrom('expedientes').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forShare().executeTakeFirst();
+    if (expediente === undefined) return undefined;
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente documents require institution-scoped records.read');
+    const documents = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('expediente_id', '=', input.expedienteId).where('matter_id', 'is', null).orderBy('created_at').orderBy('id').execute();
+    const result: MatterDocumentReadModel[] = [];
+    for (const document of documents) {
+      await assertExpedienteDocumentClassification(transaction, String(input.institutionId), document.access_classification_id);
+      const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('document_id', '=', document.id).orderBy('version_number').execute();
+      result.push({ document, versions });
+    }
+    return result;
+  });
+}
+
+export type DocumentOwner = 'MATTER' | 'EXPEDIENTE';
+
+export async function authorizeExpedienteDocumentUploadPreflight(database: Database, input: { readonly institutionId: InstitutionId | string; readonly expedienteId: string; readonly accessClassificationId: string; readonly actorUserId: string; readonly authorizationContext: AuthorizationContext }): Promise<void> {
+  await withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'expediente.edit_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document creation is not authorized');
+    const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).executeTakeFirst();
+    if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
+    if (expediente.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Expediente is not open');
+    await classificationSnapshot(transaction, String(input.institutionId), input.accessClassificationId, 'INSTITUTION');
+  });
+}
+
+/** Generic version-upload preflight. Parentage is always read from PostgreSQL. */
+export async function authorizeDocumentVersionUploadPreflight(database: Database, input: { readonly institutionId: InstitutionId | string; readonly documentId: string; readonly actorUserId: string; readonly authorizationContext: AuthorizationContext }): Promise<DocumentOwner> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const document = await transaction.selectFrom('documents').select(['matter_id', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).executeTakeFirst();
+    if (document === undefined || (document.matter_id === null) === (document.expediente_id === null)) throw new DomainInvariantError('DOCUMENT_NOT_FOUND', 'Document was not found');
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Document authorization context does not match the actor');
+    if (document.matter_id !== null) {
+      const matter = await transaction.selectFrom('matters').select(['status', 'destination_unit_id', 'intake_metadata', 'access_classification_id']).where('institution_id', '=', input.institutionId).where('id', '=', document.matter_id).executeTakeFirst();
+      if (matter === undefined) throw new DomainInvariantError('DOCUMENT_NOT_FOUND', 'Document was not found');
+      await assertMatterDocumentAuthorization(transaction, String(input.institutionId), document.matter_id, matter, input.authorizationContext, input.actorUserId);
+      return 'MATTER';
+    }
+    const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', document.expediente_id).executeTakeFirst();
+    if (expediente?.status !== 'OPEN' || !canPerform(input.authorizationContext, 'document.version_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document version is not authorized');
+    return 'EXPEDIENTE';
+  });
+}
+
+/** Generic authorized version read; dispatches by the persisted document parent. */
+export async function findDocumentVersionsAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly documentId: string; readonly authorizationContext: AuthorizationContext }): Promise<MatterDocumentReadModel | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).executeTakeFirst();
+    if (document === undefined || (document.matter_id === null) === (document.expediente_id === null)) return undefined;
+    if (input.authorizationContext.institutionId !== String(input.institutionId)) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Document authorization context does not match the tenant');
+    if (document.expediente_id !== null) {
+      if (!canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente documents require institution-scoped records.read');
+      await assertExpedienteDocumentClassification(transaction, String(input.institutionId), document.access_classification_id);
+    } else {
+      const matter = await transaction.selectFrom('matters').select(['destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', document.matter_id).forShare().executeTakeFirst();
+      if (matter === undefined || matter.intake_metadata.operationalVisibility !== 'INSTITUTION' && matter.intake_metadata.operationalVisibility !== 'UNIT') throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+      const unit = await effectiveMatterUnit(transaction, String(input.institutionId), document.matter_id!, matter.destination_unit_id);
+      if (!canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    }
+    const versions = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('document_id', '=', document.id).orderBy('version_number').execute();
+    return { document, versions };
+  });
+}
+
+async function assertExpedienteDocumentClassification(transaction: DatabaseTransaction, institutionId: string, classificationId: string | null): Promise<void> {
+  if (classificationId === null) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document classification is not supported');
+  const classification = await transaction.selectFrom('access_classifications').select('operational_visibility').where('institution_id', '=', institutionId).where('id', '=', classificationId).executeTakeFirst();
+  if (classification?.operational_visibility !== 'INSTITUTION') throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document classification is not supported');
 }
 
 export async function findMatterById(database: Database, institutionId: InstitutionId | string, matterId: string): Promise<MatterReadModel | undefined> {
@@ -787,6 +870,67 @@ export async function acceptMatterDocumentVersionUploadAtomically(database: Data
   });
 }
 
+export interface ExpedienteDocumentUploadPersistenceInput extends DocumentVersionMetadataInput {
+  readonly expedienteId: string;
+  readonly documentType: string;
+  readonly title: string;
+  readonly accessClassificationId: string;
+  readonly authorizationContext: AuthorizationContext;
+}
+
+/** Accepts the first document owned directly by an expediente. */
+export async function acceptExpedienteDocumentUploadAtomically(database: Database, input: ExpedienteDocumentUploadPersistenceInput): Promise<AcceptedMatterDocumentUpload> {
+  requireDocumentMetadata(input);
+  if (input.documentType.trim().length === 0 || input.title.trim().length === 0 || input.accessClassificationId.trim().length === 0) throw new DomainInvariantError('INVALID_DOCUMENT_METADATA', 'Document metadata is required');
+  if (input.malwareScanStatus !== 'PENDING_SCAN') throw new DomainInvariantError('INVALID_INITIAL_SCAN_STATUS', 'A new document version must begin pending malware scan');
+  if (input.replacementReason !== undefined) throw new DomainInvariantError('INVALID_DOCUMENT_METADATA', 'The first document version cannot have a replacement reason');
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.createdBy) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Document authorization context does not match the actor');
+    if (!canPerform(input.authorizationContext, 'expediente.edit_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document creation requires institution-scoped expediente.edit_open');
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'status']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
+    if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
+    if (expediente.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Expediente is not open');
+    const snapshot = await classificationSnapshot(transaction, String(input.institutionId), input.accessClassificationId, 'INSTITUTION');
+    const acceptedAt = await databaseTimestamp(transaction, 'Expediente document acceptance');
+    await transaction.insertInto('documents').values({ id: input.documentId, institution_id: input.institutionId, expediente_id: input.expedienteId, matter_id: null, document_type: input.documentType, title: input.title, access_classification_id: input.accessClassificationId, created_at: acceptedAt, updated_at: acceptedAt }).execute();
+    await transaction.insertInto('document_versions').values({ id: input.versionId, institution_id: input.institutionId, document_id: input.documentId, version_number: 1, original_filename: input.originalFilename, detected_mime_type: input.detectedMimeType, ...(input.declaredMimeType === undefined ? {} : { declared_mime_type: input.declaredMimeType }), size_bytes: input.sizeBytes, sha256: input.sha256, storage_key: input.storageKey, access_classification_snapshot: snapshot, malware_scan_status: 'PENDING_SCAN', created_by: input.createdBy, created_at: acceptedAt }).execute();
+    await transaction.updateTable('documents').set({ current_version_id: input.versionId, updated_at: acceptedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).execute();
+    const job = await insertMalwareScanJob(transaction, { institutionId: String(input.institutionId), versionId: input.versionId, storageKey: input.storageKey, sizeBytes: input.sizeBytes, correlationId: input.correlationId });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.createdBy, eventType: 'document.created', aggregateType: 'document', aggregateId: input.documentId, correlationId: input.correlationId, afterData: { expedienteId: input.expedienteId, documentType: input.documentType, accessClassificationId: input.accessClassificationId } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.createdBy, eventType: 'document.version_created', aggregateType: 'document', aggregateId: input.documentId, correlationId: input.correlationId, eventData: { versionId: input.versionId, versionNumber: 1 } });
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).executeTakeFirstOrThrow();
+    const version = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).executeTakeFirstOrThrow();
+    return { document, version, job };
+  });
+}
+
+/** Accepts a replacement version for an expediente-owned logical document. */
+export async function acceptExpedienteDocumentVersionUploadAtomically(database: Database, input: DocumentVersionMetadataInput & { readonly authorizationContext: AuthorizationContext }): Promise<{ readonly version: Selectable<DocumentVersionsTable>; readonly job: Selectable<IntegrationJobsTable> }> {
+  requireDocumentMetadata(input);
+  if (input.malwareScanStatus !== 'PENDING_SCAN') throw new DomainInvariantError('INVALID_INITIAL_SCAN_STATUS', 'A new document version must begin pending malware scan');
+  if (input.replacementReason === undefined || input.replacementReason.trim().length === 0) throw new DomainInvariantError('REPLACEMENT_REASON_REQUIRED', 'A replacement document version requires a reason');
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.createdBy) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Document authorization context does not match the actor');
+    const document = await transaction.selectFrom('documents').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).forUpdate().executeTakeFirst();
+    if (document === undefined) throw new Error('Document not found');
+    if (document.expediente_id === null || document.matter_id !== null) throw new DomainInvariantError('INVALID_DOCUMENT_PARENT', 'This operation only accepts expediente-owned documents');
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'status']).where('institution_id', '=', input.institutionId).where('id', '=', document.expediente_id).forUpdate().executeTakeFirst();
+    if (expediente === undefined) throw new Error('Document not found');
+    if (expediente.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Expediente is not open');
+    if (!canPerform(input.authorizationContext, 'document.version_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document version is not authorized');
+    const latest = await transaction.selectFrom('document_versions').select(({ fn }) => fn.max('version_number').as('latest_version')).where('institution_id', '=', input.institutionId).where('document_id', '=', input.documentId).executeTakeFirst();
+    const versionNumber = Number(latest?.latest_version ?? 0) + 1;
+    const snapshot = await classificationSnapshot(transaction, String(input.institutionId), document.access_classification_id, 'INSTITUTION');
+    const acceptedAt = await databaseTimestamp(transaction, 'Expediente document version acceptance');
+    await transaction.insertInto('document_versions').values({ id: input.versionId, institution_id: input.institutionId, document_id: input.documentId, version_number: versionNumber, original_filename: input.originalFilename, detected_mime_type: input.detectedMimeType, ...(input.declaredMimeType === undefined ? {} : { declared_mime_type: input.declaredMimeType }), size_bytes: input.sizeBytes, sha256: input.sha256, storage_key: input.storageKey, access_classification_snapshot: snapshot, malware_scan_status: 'PENDING_SCAN', created_by: input.createdBy, replacement_reason: input.replacementReason, created_at: acceptedAt }).execute();
+    await transaction.updateTable('documents').set({ current_version_id: input.versionId, updated_at: acceptedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.documentId).execute();
+    const job = await insertMalwareScanJob(transaction, { institutionId: String(input.institutionId), versionId: input.versionId, storageKey: input.storageKey, sizeBytes: input.sizeBytes, correlationId: input.correlationId });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.createdBy, eventType: 'document.version_created', aggregateType: 'document', aggregateId: input.documentId, correlationId: input.correlationId, eventData: { versionId: input.versionId, versionNumber } });
+    const version = await transaction.selectFrom('document_versions').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).executeTakeFirstOrThrow();
+    return { version, job };
+  });
+}
+
 export interface AuthorizedDocumentDownload {
   readonly versionId: string;
   readonly storageKey: string;
@@ -817,6 +961,27 @@ export async function authorizeMatterDocumentVersionDownload(database: Database,
   });
   if (documentId === undefined) throw new Error('Document not found');
   return authorizeMatterDocumentDownload(database, { institutionId: input.institutionId, documentId, versionId: input.versionId, authorizationContext: input.authorizationContext });
+}
+
+/** Ownership-aware protected download authorization. */
+export async function authorizeDocumentVersionDownload(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly authorizationContext: AuthorizationContext }): Promise<AuthorizedDocumentDownload> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('documents as d').innerJoin('document_versions as v', (join) => join.onRef('v.institution_id', '=', 'd.institution_id').onRef('v.document_id', '=', 'd.id')).select(['d.id as document_id', 'd.matter_id', 'd.expediente_id', 'v.id as version_id', 'v.storage_key', 'v.original_filename', 'v.detected_mime_type', 'v.size_bytes', 'v.sha256', 'v.malware_scan_status']).where('d.institution_id', '=', input.institutionId).where('v.id', '=', input.versionId).executeTakeFirst();
+    if (row === undefined || (row.matter_id === null) === (row.expediente_id === null)) throw new Error('Document not found');
+    if (input.authorizationContext.institutionId !== String(input.institutionId)) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', 'Document authorization context does not match the tenant');
+    if (row.expediente_id !== null) {
+      if (!canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente documents require institution-scoped records.read');
+      const document = await transaction.selectFrom('documents').select('access_classification_id').where('institution_id', '=', input.institutionId).where('id', '=', row.document_id).executeTakeFirst();
+      await assertExpedienteDocumentClassification(transaction, String(input.institutionId), document?.access_classification_id ?? null);
+    } else {
+      const matter = await transaction.selectFrom('matters').select(['destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', row.matter_id).forShare().executeTakeFirst();
+      if (matter === undefined || (matter.intake_metadata.operationalVisibility !== 'INSTITUTION' && matter.intake_metadata.operationalVisibility !== 'UNIT')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Matter visibility is not supported');
+      const unit = await effectiveMatterUnit(transaction, String(input.institutionId), row.matter_id!, matter.destination_unit_id);
+      if (!canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read the effective matter unit');
+    }
+    if (row.malware_scan_status !== 'CLEAN') throw new DomainInvariantError('DOCUMENT_NOT_AVAILABLE', 'Document is not available for download');
+    return { versionId: row.version_id, storageKey: row.storage_key, originalFilename: row.original_filename, detectedMimeType: row.detected_mime_type, sizeBytes: row.size_bytes, sha256: row.sha256 };
+  });
 }
 
 export async function recordMalwareScanResultAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly jobId: string; readonly claimToken: string; readonly versionId: string; readonly scanId: string; readonly result: 'CLEAN' | 'INFECTED' | 'SCAN_FAILED'; readonly engine: string; readonly engineVersion?: string; readonly signatureVersion?: string; readonly scannedAt?: Date; readonly error?: string; readonly correlationId: string; }): Promise<void> {

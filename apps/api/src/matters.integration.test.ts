@@ -250,7 +250,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
 
   it('enforces effective-unit provenance and serializes competing linkage attempts', async () => {
     currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register']), unitCapabilities: new Map() } };
-    const createExpediente = async (id: string, folio: string) => db().insertInto('expedientes').values({ id, institution_id: institutionA, folio, folio_year: 2050, sequence_number: Number(folio.slice(-1)), status: 'OPEN', expediente_type_version_id: '11000000-0000-4000-8000-000000000061', metadata: {}, opened_at: new Date('2050-09-11T12:00:00.000Z') }).execute();
+    const createExpediente = async (id: string, folio: string) => db().insertInto('expedientes').values({ id, institution_id: institutionA, folio, folio_year: 2050, sequence_number: Number(folio.slice(-6)), status: 'OPEN', expediente_type_version_id: '11000000-0000-4000-8000-000000000061', metadata: {}, opened_at: new Date('2050-09-11T12:00:00.000Z') }).execute();
     const createMatter = async (receivedAt: string) => {
       const response = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt } });
       expect(response.statusCode).toBe(201);
@@ -281,7 +281,7 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     const concurrentExpedienteB = '11000000-0000-4000-8000-000000000067';
     await createExpediente(concurrentExpedienteA, 'EXP-2050-000006');
     await createExpediente(concurrentExpedienteB, 'EXP-2050-000007');
-    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['expediente.edit_open']), unitCapabilities: new Map() } };
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'expediente.edit_open']), unitCapabilities: new Map() } };
     const results = await Promise.all([
       api().inject({ method: 'POST', url: `/matters/${concurrentMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: concurrentExpedienteA } }),
       api().inject({ method: 'POST', url: `/matters/${concurrentMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: concurrentExpedienteB } }),
@@ -289,6 +289,29 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect(results.map((result) => result.statusCode).sort()).toEqual([200, 409]);
     expect((await db().selectFrom('audit_events').selectAll().where('aggregate_id', '=', concurrentMatter).where('event_type', '=', 'matter.linked_to_expediente').execute())).toHaveLength(1);
     expect((await db().selectFrom('matters').select('linked_expediente_id').where('id', '=', concurrentMatter).executeTakeFirstOrThrow()).linked_expediente_id).toBeOneOf([concurrentExpedienteA, concurrentExpedienteB]);
+
+    const secondTarget = '11000000-0000-4000-8000-000000000068';
+    await createExpediente(secondTarget, 'EXP-2050-000008');
+    const differentTarget = await api().inject({ method: 'POST', url: `/matters/${concurrentMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: secondTarget } });
+    expect(differentTarget.statusCode).toBe(409);
+
+    const terminalMatter = await createMatter('2053-09-11T12:00:00.000Z');
+    const terminalTarget = '11000000-0000-4000-8000-000000000069';
+    await createExpediente(terminalTarget, 'EXP-2050-000009');
+    await db().updateTable('matters').set({ status: 'VOIDED' }).where('id', '=', terminalMatter).execute();
+    const terminalLink = await api().inject({ method: 'POST', url: `/matters/${terminalMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: terminalTarget } });
+    expect(terminalLink.statusCode).toBe(400);
+
+    const closedTarget = '11000000-0000-4000-8000-000000000070';
+    await createExpediente(closedTarget, 'EXP-2050-000010');
+    await db().updateTable('expedientes').set({ status: 'CLOSED' }).where('id', '=', closedTarget).execute();
+    const targetStateMatter = await createMatter('2054-09-11T12:00:00.000Z');
+    const closedLink = await api().inject({ method: 'POST', url: `/matters/${targetStateMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: closedTarget } });
+    expect(closedLink.statusCode).toBe(400);
+    await db().updateTable('expedientes').set({ status: 'TRANSFER_PENDING' }).where('id', '=', closedTarget).execute();
+    const pendingTargetMatter = await createMatter('2055-09-11T12:00:00.000Z');
+    const pendingLink = await api().inject({ method: 'POST', url: `/matters/${pendingTargetMatter}/link-expediente`, headers: { authorization: 'Bearer test' }, payload: { expedienteId: closedTarget } });
+    expect(pendingLink.statusCode).toBe(400);
   });
 
   it('rejects assignment outside the principal capability scope', async () => {

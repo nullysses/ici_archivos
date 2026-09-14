@@ -7,6 +7,7 @@ import { createMatterApplicationService } from './matters.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { S3DocumentStorage } from '@ici/integration-storage';
 import { createExpedienteApplicationService } from './expedientes.js';
+import { createArchiveTransferApplicationService } from './transfers.js';
 
 const config = readApiConfig();
 const database = createDatabase(config.databaseUrl);
@@ -21,6 +22,7 @@ const app = await createApp({
   authenticateAccessToken: (accessToken) => authenticateAccessToken(database, accessTokenVerifier, accessToken),
   matterService: createMatterApplicationService(database),
   expedienteService: createExpedienteApplicationService(database),
+  archiveTransferService: createArchiveTransferApplicationService(database),
   checkDatabase: () => checkDatabase(database),
   version: process.env.npm_package_version ?? '0.0.0',
   webOrigin: config.webOrigin,

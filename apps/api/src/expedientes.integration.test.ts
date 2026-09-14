@@ -5,6 +5,7 @@ import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, au
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createExpedienteApplicationService } from './expedientes.js';
+import { createArchiveTransferApplicationService } from './transfers.js';
 
 const institutionA = '21000000-0000-4000-8000-000000000001';
 const institutionB = '21000000-0000-4000-8000-000000000002';
@@ -61,6 +62,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     app = await createApp({
       authenticateAccessToken: () => Promise.resolve(principal),
       expedienteService: createExpedienteApplicationService(database),
+      archiveTransferService: createArchiveTransferApplicationService(database),
       checkDatabase: () => Promise.resolve(true),
       version: 'test',
       webOrigin: 'http://localhost',
@@ -188,5 +190,35 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     const repeated = await api().inject({ method: 'POST', url: `/expedientes/${id}/close`, headers: { authorization: 'Bearer test' }, payload: { closureMetadata: { reason: 'Again' } } });
     expect(repeated.statusCode).toBe(409);
     expect(repeated.json()).toMatchObject({ error: { code: 'INVALID_TRANSITION' } });
+  });
+
+  it('creates and approves a canonical transfer manifest for a closed expediente', async () => {
+    principal = {
+      ...principal,
+      authorization: {
+        ...principal.authorization,
+        institutionCapabilities: new Set(['expediente.create', 'records.read', 'archive_transfer.prepare', 'archive_transfer.approve']),
+        unitCapabilities: new Map(),
+      },
+    };
+    const created = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Transfer source' } } });
+    const expedienteId = created.json<{ id: string }>().id;
+    await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', expedienteId).execute();
+
+    const draft = await api().inject({ method: 'POST', url: `/expedientes/${expedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
+    expect(draft.statusCode).toBe(201);
+    const draftBody = draft.json<{ id: string; status: string; expedienteId: string; manifest: { id: string; status: string; canonicalJson: string; sha256: string | null; documents: unknown[] } }>();
+    expect(draftBody).toMatchObject({ status: 'DRAFT', expedienteId, manifest: { status: 'DRAFT', sha256: null, documents: [] } });
+    const canonical = JSON.parse(draftBody.manifest.canonicalJson) as { expedienteId: string; folio: string; documents: unknown[] };
+    expect(canonical).toMatchObject({ expedienteId, documents: [] });
+
+    const approved = await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/approve`, headers: { authorization: 'Bearer test' }, payload: {} });
+    expect(approved.statusCode).toBe(200);
+    const approvedBody = approved.json<{ status: string; manifest: { status: string; sha256: string | null } }>();
+    expect(approvedBody.status).toBe('APPROVED');
+    expect(approvedBody.manifest.status).toBe('APPROVED');
+    expect(approvedBody.manifest.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect((await api().inject({ method: 'GET', url: `/archive-transfers/${draftBody.id}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(200);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }, { event_type: 'archive_transfer.approved' }]));
   });
 });

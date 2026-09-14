@@ -6,6 +6,7 @@ import { installAuthentication, type AuthenticateRequest } from './auth-plugin.j
 import { installMatterRoutes, type MatterApplicationService, MatterHttpError } from './matters.js';
 import { installDocumentRoutes, type DocumentApplicationDependencies, DocumentHttpError } from './documents.js';
 import { installExpedienteRoutes, type ExpedienteApplicationService, ExpedienteHttpError } from './expedientes.js';
+import { installArchiveTransferRoutes, type ArchiveTransferApplicationService, TransferHttpError } from './transfers.js';
 
 export interface AppDependencies {
   readonly authenticateAccessToken: AuthenticateRequest;
@@ -15,6 +16,7 @@ export interface AppDependencies {
   readonly webOrigin: string;
   readonly documentDependencies?: Omit<DocumentApplicationDependencies, 'authenticate'>;
   readonly expedienteService?: ExpedienteApplicationService;
+  readonly archiveTransferService?: ArchiveTransferApplicationService;
 }
 
 export async function createApp(dependencies: AppDependencies): Promise<FastifyInstance> {
@@ -23,7 +25,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
 
   await app.register(cors, { origin: dependencies.webOrigin });
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof MatterHttpError || error instanceof DocumentHttpError || error instanceof ExpedienteHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof MatterHttpError || error instanceof DocumentHttpError || error instanceof ExpedienteHttpError || error instanceof TransferHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if ((error as { readonly code?: unknown }).code === 'FST_ERR_VALIDATION') return reply.code(400).send({ error: { code: 'INVALID_REQUEST', message: 'Request validation failed' } });
     request.log.error(error);
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
@@ -68,6 +70,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
 
   if (dependencies.matterService !== undefined) installMatterRoutes(app, dependencies.matterService, dependencies.authenticateAccessToken);
   if (dependencies.expedienteService !== undefined) installExpedienteRoutes(app, dependencies.expedienteService, dependencies.authenticateAccessToken);
+  if (dependencies.archiveTransferService !== undefined) installArchiveTransferRoutes(app, dependencies.archiveTransferService, dependencies.authenticateAccessToken);
   if (dependencies.documentDependencies !== undefined) await installDocumentRoutes(app, { ...dependencies.documentDependencies, authenticate: dependencies.authenticateAccessToken });
 
   return app;

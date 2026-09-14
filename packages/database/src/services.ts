@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { ArchiveTransferState, AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable } from './schema.js';
+import type { ArchiveTransfersTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -1099,6 +1099,132 @@ export async function approveTransferAndManifestAtomically(database: Database, i
     if (canonicalManifestSha256(manifest.canonical_json) !== normalizedSha256) throw new DomainInvariantError('MANIFEST_HASH_MISMATCH', 'Manifest SHA-256 must match the canonical JSON bytes');
     await transaction.updateTable('transfer_manifests').set({ status: 'APPROVED', sha256: normalizedSha256, approved_by: input.actorUserId, approved_at: input.approvedAt, updated_at: input.approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.manifestId).execute();
     await transaction.updateTable('archive_transfers').set({ status: 'APPROVED', updated_at: input.approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
+  });
+}
+
+export interface ArchiveTransferReadModel {
+  readonly transfer: Selectable<ArchiveTransfersTable>;
+  readonly manifest: Selectable<TransferManifestsTable>;
+}
+
+interface ManifestDocumentRow {
+  readonly documentId: string;
+  readonly versionId: string;
+  readonly versionNumber: number;
+  readonly filename: string;
+  readonly sha256: string;
+  readonly sizeBytes: string;
+  readonly mimeType: string;
+  readonly current: boolean;
+  readonly createdAt: Date | string;
+  readonly matterId: string | null;
+  readonly expedienteId: string | null;
+}
+
+function toCanonicalManifestDocument(document: ManifestDocumentRow): Record<string, unknown> {
+  return {
+    documentId: document.documentId,
+    versionId: document.versionId,
+    versionNumber: document.versionNumber,
+    filename: document.filename,
+    sha256: document.sha256,
+    sizeBytes: document.sizeBytes,
+    mimeType: document.mimeType,
+    current: document.current,
+  };
+}
+
+function canonicalManifestValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalManifestValue);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonicalManifestValue(entry)]));
+  }
+  return value;
+}
+
+function canonicalManifestJson(value: unknown): string {
+  return JSON.stringify(canonicalManifestValue(value));
+}
+
+/** Creates a closed-expediente transfer and its deterministic draft manifest atomically. */
+export async function createArchiveTransferAndDraftManifestAtomically(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly expedienteId: string;
+  readonly transferId: string;
+  readonly manifestId: string;
+  readonly actorUserId: string;
+  readonly correlationId: string;
+  readonly authorizationContext: AuthorizationContext;
+}): Promise<ArchiveTransferReadModel> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.prepare')) {
+      throw new DomainInvariantError('NOT_AUTHORIZED', 'Transfer preparation is not authorized');
+    }
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'metadata', 'closed_at']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
+    if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
+    if (expediente.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente can be prepared for transfer');
+
+    const documents = await transaction.selectFrom('documents as d').leftJoin('matters as m', (join) => join.onRef('m.institution_id', '=', 'd.institution_id').onRef('m.id', '=', 'd.matter_id')).select([
+      'd.id as documentId', 'd.matter_id as matterId', 'd.expediente_id as expedienteId', 'd.current_version_id as currentVersionId', 'd.created_at as createdAt',
+    ]).where('d.institution_id', '=', input.institutionId).where((expression) => expression.or([
+      expression('d.expediente_id', '=', input.expedienteId),
+      expression.and([expression('d.matter_id', 'is not', null), expression('m.linked_expediente_id', '=', input.expedienteId)]),
+    ])).orderBy('d.created_at').orderBy('d.id').execute();
+    const manifestDocuments: ManifestDocumentRow[] = [];
+    for (const document of documents) {
+      const versions = await transaction.selectFrom('document_versions').select(['id as versionId', 'version_number as versionNumber', 'original_filename as filename', 'sha256', 'size_bytes as sizeBytes', 'detected_mime_type as mimeType', 'malware_scan_status as malwareScanStatus', 'created_at as createdAt']).where('institution_id', '=', input.institutionId).where('document_id', '=', document.documentId).orderBy('version_number').execute();
+      for (const version of versions) {
+        if (version.malwareScanStatus !== 'CLEAN') throw new DomainInvariantError('DOCUMENTS_NOT_CLEAN', 'All manifest document versions must have a clean malware scan');
+        manifestDocuments.push({ documentId: document.documentId, versionId: version.versionId, versionNumber: version.versionNumber, filename: version.filename, sha256: version.sha256, sizeBytes: String(version.sizeBytes), mimeType: version.mimeType, current: document.currentVersionId === version.versionId, createdAt: version.createdAt, matterId: document.matterId, expedienteId: document.expedienteId });
+      }
+    }
+    const canonicalJson = canonicalManifestJson({ transferId: input.transferId, expedienteId: input.expedienteId, folio: expediente.folio, closedAt: expediente.closed_at === null ? null : new Date(expediente.closed_at).toISOString(), metadataSnapshot: expediente.metadata, documents: manifestDocuments.map(toCanonicalManifestDocument) });
+    const createdAt = await databaseTimestamp(transaction, 'Archive transfer creation');
+    await transaction.insertInto('archive_transfers').values({ id: input.transferId, institution_id: input.institutionId, expediente_id: input.expedienteId, status: 'DRAFT', created_by: input.actorUserId, created_at: createdAt, updated_at: createdAt }).execute();
+    await transaction.insertInto('transfer_manifests').values({ id: input.manifestId, institution_id: input.institutionId, transfer_id: input.transferId, status: 'DRAFT', canonical_json: canonicalJson, created_at: createdAt, updated_at: createdAt }).execute();
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.created', aggregateType: 'archive_transfer', aggregateId: input.transferId, correlationId: input.correlationId, afterData: { status: 'DRAFT', expedienteId: input.expedienteId, manifestId: input.manifestId } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'transfer_manifest.created', aggregateType: 'transfer_manifest', aggregateId: input.manifestId, correlationId: input.correlationId, afterData: { status: 'DRAFT', transferId: input.transferId } });
+    return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.manifestId).executeTakeFirstOrThrow() };
+  });
+}
+
+/** Approves a draft transfer and freezes its canonical manifest in one transaction. */
+export async function approveArchiveTransferManifestAtomically(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly transferId: string;
+  readonly actorUserId: string;
+  readonly correlationId: string;
+  readonly authorizationContext: AuthorizationContext;
+}): Promise<ArchiveTransferReadModel> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.approve')) {
+      throw new DomainInvariantError('NOT_AUTHORIZED', 'Transfer approval is not authorized');
+    }
+    const transfer = await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
+    if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
+    if (transfer.status !== 'DRAFT') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a draft transfer may be approved');
+    const expediente = await transaction.selectFrom('expedientes').select(['status']).where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
+    if (expediente?.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente may have an approved transfer');
+    const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).forUpdate().executeTakeFirst();
+    if (manifest === undefined) throw new DomainInvariantError('MANIFEST_NOT_FOUND', 'Transfer manifest not found');
+    if (manifest.status !== 'DRAFT') throw new DomainInvariantError('MANIFEST_IMMUTABLE', 'Only a draft transfer manifest may be approved');
+    const sha256 = canonicalManifestSha256(manifest.canonical_json);
+    const approvedAt = await databaseTimestamp(transaction, 'Transfer approval');
+    await transaction.updateTable('transfer_manifests').set({ status: 'APPROVED', sha256, approved_by: input.actorUserId, approved_at: approvedAt, updated_at: approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', manifest.id).execute();
+    await transaction.updateTable('archive_transfers').set({ status: 'APPROVED', updated_at: approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', transfer.id).execute();
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'transfer_manifest.approved', aggregateType: 'transfer_manifest', aggregateId: manifest.id, correlationId: input.correlationId, beforeData: { status: 'DRAFT' }, afterData: { status: 'APPROVED', sha256 }, eventData: { transferId: transfer.id } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.approved', aggregateType: 'archive_transfer', aggregateId: transfer.id, correlationId: input.correlationId, beforeData: { status: 'DRAFT' }, afterData: { status: 'APPROVED', manifestId: manifest.id } });
+    return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', transfer.id).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', manifest.id).executeTakeFirstOrThrow() };
+  });
+}
+
+export async function findArchiveTransferWithManifest(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string }): Promise<ArchiveTransferReadModel | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const transfer = await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirst();
+    if (transfer === undefined) return undefined;
+    const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).executeTakeFirst();
+    if (manifest === undefined) return undefined;
+    return { transfer, manifest };
   });
 }
 

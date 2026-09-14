@@ -98,7 +98,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
   });
 
   it('accepts an expediente-owned first document with a durable malware job and immutable classification snapshot', async () => {
-    await db().insertInto('access_classifications').values({ id: documentClassification, institution_id: institutionA, legal_classification: 'CONFIDENTIAL', operational_visibility: 'INSTITUTION', reason: 'Test classification' }).execute();
+    await db().insertInto('access_classifications').values({ id: documentClassification, institution_id: institutionA, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
     await db().insertInto('expedientes').values({ id: documentExpediente, institution_id: institutionA, folio: 'EXP-2026-000901', folio_year: 2026, sequence_number: 901, status: 'OPEN', expediente_type_version_id: publishedVersionA, metadata: { title: 'Document owner' }, opened_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
     const documentId = '21000000-0000-4000-8000-00000000000e';
     const versionId = '21000000-0000-4000-8000-00000000000f';
@@ -110,7 +110,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       createdBy: userA, correlationId: 'expediente-document-acceptance', authorizationContext: principal.authorization,
     });
     expect(accepted.document).toMatchObject({ expediente_id: documentExpediente, matter_id: null, current_version_id: versionId, access_classification_id: documentClassification });
-    expect(accepted.version).toMatchObject({ version_number: 1, malware_scan_status: 'PENDING_SCAN', access_classification_snapshot: { legalClassification: 'CONFIDENTIAL', operationalVisibility: 'INSTITUTION' } });
+    expect(accepted.version).toMatchObject({ version_number: 1, malware_scan_status: 'PENDING_SCAN', access_classification_snapshot: { legalClassification: 'PUBLIC', operationalVisibility: 'INSTITUTION' } });
     expect(accepted.job).toMatchObject({ job_type: 'document.malware_scan', aggregate_type: 'document_version', aggregate_id: versionId, status: 'PENDING' });
     expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', documentId).orderBy('occurred_at').execute()).toEqual([{ event_type: 'document.created' }, { event_type: 'document.version_created' }]);
   });

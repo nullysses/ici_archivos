@@ -15,6 +15,17 @@ export type ArchiveTransferCreateRequest = Static<typeof ArchiveTransferCreateRe
 export const ArchiveTransferApproveRequestSchema = EmptyObject;
 export type ArchiveTransferApproveRequest = Static<typeof ArchiveTransferApproveRequestSchema>;
 
+export const ArchiveTransferSubmitRequestSchema = EmptyObject;
+export type ArchiveTransferSubmitRequest = Static<typeof ArchiveTransferSubmitRequestSchema>;
+
+export const ArchiveTransferRetryRequestSchema = EmptyObject;
+export type ArchiveTransferRetryRequest = Static<typeof ArchiveTransferRetryRequestSchema>;
+
+export const ArchiveTransferCancelRequestSchema = Type.Object({
+  reason: Type.String({ minLength: 1, maxLength: 4000 }),
+}, { additionalProperties: false, $id: 'ArchiveTransferCancelRequest' });
+export type ArchiveTransferCancelRequest = Static<typeof ArchiveTransferCancelRequestSchema>;
+
 export const TransferManifestDocumentSchema = Type.Object({
   documentId: Uuid,
   versionId: Uuid,
@@ -48,4 +59,3 @@ export const ArchiveTransferResponseSchema = Type.Object({
   manifest: TransferManifestSchema,
 }, { additionalProperties: false, $id: 'ArchiveTransferResponse' });
 export type ArchiveTransferResponse = Static<typeof ArchiveTransferResponseSchema>;
-

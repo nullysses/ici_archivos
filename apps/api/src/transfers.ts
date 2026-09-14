@@ -6,18 +6,27 @@ import {
   ArchiveTransferExpedienteParamsSchema,
   ArchiveTransferIdParamsSchema,
   ArchiveTransferResponseSchema,
+  ArchiveTransferSubmitRequestSchema,
+  ArchiveTransferRetryRequestSchema,
+  ArchiveTransferCancelRequestSchema,
   MatterErrorSchema,
   type ArchiveTransferApproveRequest,
   type ArchiveTransferCreateRequest,
   type ArchiveTransferExpedienteParams,
   type ArchiveTransferIdParams,
   type ArchiveTransferResponse,
+  type ArchiveTransferSubmitRequest,
+  type ArchiveTransferRetryRequest,
+  type ArchiveTransferCancelRequest,
 } from '@ici/contracts';
 import {
   approveArchiveTransferManifestAtomically,
+  cancelArchiveTransferAtomically,
   canPerform,
   createArchiveTransferAndDraftManifestAtomically,
   findArchiveTransferWithManifest,
+  retryArchiveTransferAtomically,
+  submitArchiveTransferAtomically,
   type ArchiveTransferReadModel,
   type Database,
 } from '@ici/database';
@@ -39,6 +48,9 @@ export class TransferHttpError extends Error {
 export interface ArchiveTransferApplicationService {
   create(input: { readonly institutionId: string; readonly expedienteId: string; readonly transferId: string; readonly manifestId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   approve(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
+  submit(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
+  retry(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
+  cancel(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly reason: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   byId(institutionId: string, transferId: string): Promise<ArchiveTransferReadModel | undefined>;
 }
 
@@ -57,6 +69,28 @@ export function createArchiveTransferApplicationService(database: Database): Arc
       institutionId: input.institutionId,
       transferId: input.transferId,
       actorUserId: input.actorUserId,
+      correlationId: input.correlationId,
+      authorizationContext: input.authorization,
+    }),
+    submit: (input) => submitArchiveTransferAtomically(database, {
+      institutionId: input.institutionId,
+      transferId: input.transferId,
+      actorUserId: input.actorUserId,
+      correlationId: input.correlationId,
+      authorizationContext: input.authorization,
+    }),
+    retry: (input) => retryArchiveTransferAtomically(database, {
+      institutionId: input.institutionId,
+      transferId: input.transferId,
+      actorUserId: input.actorUserId,
+      correlationId: input.correlationId,
+      authorizationContext: input.authorization,
+    }),
+    cancel: (input) => cancelArchiveTransferAtomically(database, {
+      institutionId: input.institutionId,
+      transferId: input.transferId,
+      actorUserId: input.actorUserId,
+      reason: input.reason,
       correlationId: input.correlationId,
       authorizationContext: input.authorization,
     }),
@@ -109,6 +143,42 @@ export function installArchiveTransferRoutes(app: FastifyInstance, service: Arch
       } catch (error) { throw mapTransferError(error); }
     },
   );
+
+  app.post<{ Params: ArchiveTransferIdParams; Body: ArchiveTransferSubmitRequest; Reply: ArchiveTransferResponse }>(
+    '/archive-transfers/:transferId/submit',
+    { preHandler, schema: { params: ArchiveTransferIdParamsSchema, body: ArchiveTransferSubmitRequestSchema, response: { 200: ArchiveTransferResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try {
+        const principal = request.principal;
+        const result = await service.submit({ transferId: request.params.transferId, institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, authorization: principal.authorization });
+        return reply.code(200).send(toArchiveTransferResponse(result));
+      } catch (error) { throw mapTransferError(error); }
+    },
+  );
+
+  app.post<{ Params: ArchiveTransferIdParams; Body: ArchiveTransferRetryRequest; Reply: ArchiveTransferResponse }>(
+    '/archive-transfers/:transferId/retry',
+    { preHandler, schema: { params: ArchiveTransferIdParamsSchema, body: ArchiveTransferRetryRequestSchema, response: { 200: ArchiveTransferResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try {
+        const principal = request.principal;
+        const result = await service.retry({ transferId: request.params.transferId, institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, authorization: principal.authorization });
+        return reply.code(200).send(toArchiveTransferResponse(result));
+      } catch (error) { throw mapTransferError(error); }
+    },
+  );
+
+  app.post<{ Params: ArchiveTransferIdParams; Body: ArchiveTransferCancelRequest; Reply: ArchiveTransferResponse }>(
+    '/archive-transfers/:transferId/cancel',
+    { preHandler, schema: { params: ArchiveTransferIdParamsSchema, body: ArchiveTransferCancelRequestSchema, response: { 200: ArchiveTransferResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try {
+        const principal = request.principal;
+        const result = await service.cancel({ transferId: request.params.transferId, institutionId: principal.institutionId, actorUserId: principal.userId, reason: request.body.reason, correlationId: request.id, authorization: principal.authorization });
+        return reply.code(200).send(toArchiveTransferResponse(result));
+      } catch (error) { throw mapTransferError(error); }
+    },
+  );
 }
 
 function mapTransferError(error: unknown): TransferHttpError {
@@ -116,7 +186,8 @@ function mapTransferError(error: unknown): TransferHttpError {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new TransferHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'EXPEDIENTE_NOT_FOUND' || code === 'TRANSFER_NOT_FOUND' || code === 'MANIFEST_NOT_FOUND') return new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
-  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'TRANSFER_NOT_READY' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
+  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'TRANSFER_NOT_READY' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE' || code === 'MANIFEST_NOT_APPROVED' || code === 'MANIFEST_HASH_MISMATCH' || code === 'INVALID_JOB_STATE' || code === 'CANCELLATION_NOT_SAFE' || code === 'TRANSFER_NOT_COMPLETE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
+  if (code === 'REASON_REQUIRED' || code === 'INVALID_JOB_ERROR') return new TransferHttpError(400, 'INVALID_REQUEST', 'Request validation failed');
   throw error;
 }
 

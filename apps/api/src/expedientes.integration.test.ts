@@ -116,6 +116,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
   });
 
   it('reports a closed expediente as a state conflict during version preflight', async () => {
+    await db().updateTable('document_versions').set({ malware_scan_status: 'CLEAN' }).where('id', '=', '21000000-0000-4000-8000-00000000000f').execute();
     await db().updateTable('expedientes').set({ status: 'CLOSED' }).where('id', '=', documentExpediente).execute();
     await expect(authorizeDocumentVersionUploadPreflight(db(), { institutionId: institutionA, documentId: '21000000-0000-4000-8000-00000000000e', actorUserId: userA, authorizationContext: principal.authorization })).rejects.toMatchObject({ code: 'EXPEDIENTE_NOT_OPEN' });
     await db().updateTable('expedientes').set({ status: 'OPEN' }).where('id', '=', documentExpediente).execute();

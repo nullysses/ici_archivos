@@ -122,7 +122,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     }
     const invalid = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: {} } });
     expect(invalid.statusCode).toBe(400);
-    expect(await db().selectFrom('expedientes').select('id').where('institution_id', '=', institutionA).execute()).toHaveLength(1);
+    expect(await db().selectFrom('expedientes').select('id').where('institution_id', '=', institutionA).where('id', '!=', documentExpediente).execute()).toHaveLength(1);
   });
 
   it('requires institution-scoped capabilities and rejects system-field injection', async () => {

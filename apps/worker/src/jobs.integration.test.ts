@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { applyFoundationMigrations, acceptMatterDocumentUploadAtomically, assignMatterAtomically, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createDatabase, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
@@ -225,5 +225,95 @@ describe('durable malware worker', () => {
     expect((await db().selectFrom('matters').select(['status', 'resolution_metadata']).where('id', '=', matterId).executeTakeFirstOrThrow())).toMatchObject({ status: 'RESOLVED', resolution_metadata: { outcome: 'document processed' } });
     expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED']);
     expect((await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', matterId).execute()).map((event) => event.event_type)).toEqual(expect.arrayContaining(['matter.registered', 'matter.assigned', 'matter.started', 'matter.resolved']));
+  });
+
+  it('completes the Step 6 expediente lifecycle through clean closure', async () => {
+    const typeId = '33000000-0000-4000-8000-000000000027';
+    const typeVersionId = '33000000-0000-4000-8000-000000000028';
+    const expedienteId = '33000000-0000-4000-8000-000000000029';
+    const matterId = '33000000-0000-4000-8000-000000000030';
+    const assignmentId = '33000000-0000-4000-8000-000000000031';
+    const documentId = '33000000-0000-4000-8000-000000000032';
+    const versionId = '33000000-0000-4000-8000-000000000033';
+    const correlation = `step6-${expedienteId}`;
+    const authorization: AuthorizationContext = {
+      userId,
+      institutionId,
+      institutionCapabilities: new Set<Capability>([
+        'expediente.create', 'expediente.edit_open', 'expediente.close', 'records.read', 'document.version_open',
+        'matter.assign', 'matter.start', 'matter.resolve', 'matter.close',
+      ]),
+      unitCapabilities: new Map<string, ReadonlySet<Capability>>(),
+    };
+    const schema = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false };
+    await db().insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'STEP6', name: 'Step 6 type', status: 'ACTIVE' }).execute();
+    await db().insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: { levelOfDescription: 'File' }, published_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
+    const validator = createExpedienteSchemaValidator();
+    await createExpedienteAtomically(db(), { id: expedienteId, institutionId, expedienteTypeVersionId: typeVersionId, metadata: { title: 'Integrated expediente' }, actorUserId: userId, correlationId: `${correlation}-create` }, validator.validateMetadata);
+    const expediente = await db().selectFrom('expedientes').selectAll().where('institution_id', '=', institutionId).where('id', '=', expedienteId).executeTakeFirstOrThrow();
+    expect(expediente.status).toBe('OPEN');
+    expect(expediente.folio).toMatch(/^EXP-[0-9]{4}-[0-9]{6}$/);
+    expect(expediente.expediente_type_version_id).toBe(typeVersionId);
+    expect(await db().selectFrom('expediente_state_events').select('to_status').where('institution_id', '=', institutionId).where('expediente_id', '=', expedienteId).execute()).toEqual([{ to_status: 'OPEN' }]);
+    expect((await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).map((event) => event.event_type)).toContain('expediente.created');
+
+    await registerMatterAtomically(db(), { id: matterId, institutionId, receivedAt: new Date('2026-09-14T12:00:00.000Z'), createdBy: userId, actorUserId: userId, intakeMetadata: { sender: 'step6', subject: 'Integrated workflow', description: 'End-to-end expediente workflow', priority: 'NORMAL', channel: 'EMAIL', operationalVisibility: 'INSTITUTION' }, correlationId: `${correlation}-matter`, year: 2026, destinationUnitId: unitId, accessClassificationId: classificationId });
+    await assignMatterAtomically(db(), { institutionId, matterId, assignmentId, unitId, userId, actorUserId: userId, correlationId: `${correlation}-assign`, command: 'assignMatter', fromStatus: 'RECEIVED', authorizationContext: authorization });
+    await persistMatterTransition(db(), { institutionId, aggregateId: matterId, actorUserId: userId, correlationId: `${correlation}-start`, command: 'startMatter', fromStatus: 'ASSIGNED', toStatus: 'IN_PROGRESS', authorizationContext: authorization });
+    expect((await db().selectFrom('matters').select('status').where('id', '=', matterId).executeTakeFirstOrThrow()).status).toBe('IN_PROGRESS');
+
+    await linkMatterToExpedienteAtomically(db(), { institutionId, matterId, expedienteId, actorUserId: userId, correlationId: `${correlation}-link`, authorizationContext: authorization });
+    expect(await db().selectFrom('matters').select(['status', 'linked_expediente_id']).where('id', '=', matterId).executeTakeFirstOrThrow()).toMatchObject({ status: 'IN_PROGRESS', linked_expediente_id: expedienteId });
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'matter').where('aggregate_id', '=', matterId).execute()).toEqual(expect.arrayContaining([{ event_type: 'matter.linked_to_expediente' }]));
+    expect(await db().selectFrom('matter_state_events').select('command').where('institution_id', '=', institutionId).where('matter_id', '=', matterId).execute()).not.toEqual(expect.arrayContaining([{ command: 'linkMatterToExpediente' }]));
+
+    const bytes = new TextEncoder().encode('%PDF-1.7 step6 expediente evidence\n');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const storageKey = `v1/${institutionId}/${versionId}`;
+    await storage.put({ zone: 'QUARANTINE', key: storageKey, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }), sha256 });
+    const accepted = await acceptExpedienteDocumentUploadAtomically(db(), { institutionId, expedienteId, documentId, versionId, documentType: 'official', title: 'Expediente evidence', accessClassificationId: classificationId, originalFilename: 'evidence.pdf', detectedMimeType: 'application/pdf', declaredMimeType: 'application/pdf', sizeBytes: String(bytes.byteLength), sha256, storageKey, malwareScanStatus: 'PENDING_SCAN', createdBy: userId, correlationId: `${correlation}-document`, authorizationContext: authorization });
+    expect(accepted.document).toMatchObject({ matter_id: null, expediente_id: expedienteId, current_version_id: versionId });
+    expect(accepted.version).toMatchObject({ version_number: 1, malware_scan_status: 'PENDING_SCAN' });
+    expect(accepted.job).toMatchObject({ job_type: 'document.malware_scan', aggregate_id: versionId, status: 'PENDING' });
+    expect(accepted.version.access_classification_snapshot).toMatchObject({ legalClassification: 'PUBLIC', operationalVisibility: 'INSTITUTION' });
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_id', '=', documentId).execute()).toEqual(expect.arrayContaining([{ event_type: 'document.created' }, { event_type: 'document.version_created' }]));
+
+    await expect(persistExpedienteTransition(db(), { institutionId, aggregateId: expedienteId, actorUserId: userId, correlationId: `${correlation}-close-early`, command: 'closeExpediente', fromStatus: 'OPEN', toStatus: 'CLOSED', eventData: { metadataValid: true, closureMetadata: { reason: 'Matter still active' } }, authorizationContext: authorization })).rejects.toThrow(/linked matters/i);
+    expect((await db().selectFrom('expedientes').select('status').where('id', '=', expedienteId).executeTakeFirstOrThrow()).status).toBe('OPEN');
+    expect(await db().selectFrom('expediente_state_events').select('command').where('expediente_id', '=', expedienteId).where('command', '=', 'closeExpediente').execute()).toHaveLength(0);
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', '=', 'expediente.closed').execute()).toHaveLength(0);
+
+    await persistMatterTransition(db(), { institutionId, aggregateId: matterId, actorUserId: userId, correlationId: `${correlation}-resolve`, command: 'resolveMatter', fromStatus: 'IN_PROGRESS', toStatus: 'RESOLVED', eventData: { resolutionMetadata: { outcome: 'Resolved for archive' } }, authorizationContext: authorization });
+    await persistMatterTransition(db(), { institutionId, aggregateId: matterId, actorUserId: userId, correlationId: `${correlation}-close-matter`, command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { closureMetadata: { reason: 'Completed' } }, authorizationContext: authorization });
+    const closedMatter = await db().selectFrom('matters').select(['status', 'linked_expediente_id', 'closure_metadata']).where('id', '=', matterId).executeTakeFirstOrThrow();
+    expect(closedMatter).toMatchObject({ status: 'CLOSED', linked_expediente_id: expedienteId, closure_metadata: { reason: 'Completed' } });
+    const matterCloseEvent = await db().selectFrom('matter_state_events').select('event_data').where('matter_id', '=', matterId).where('command', '=', 'closeMatter').executeTakeFirstOrThrow();
+    expect(matterCloseEvent.event_data).toMatchObject({ linkedExpedienteId: expedienteId });
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'matter').where('aggregate_id', '=', matterId).where('event_type', '=', 'matter.linked_to_expediente').execute()).toHaveLength(1);
+
+    await expect(persistExpedienteTransition(db(), { institutionId, aggregateId: expedienteId, actorUserId: userId, correlationId: `${correlation}-close-pending`, command: 'closeExpediente', fromStatus: 'OPEN', toStatus: 'CLOSED', eventData: { metadataValid: true, closureMetadata: { reason: 'Awaiting scan' } }, authorizationContext: authorization })).rejects.toThrow(/clean malware/i);
+    expect((await db().selectFrom('expedientes').select('status').where('id', '=', expedienteId).executeTakeFirstOrThrow()).status).toBe('OPEN');
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', '=', 'expediente.closed').execute()).toHaveLength(0);
+
+    expect(await runMalwareScanOnce({ database: db(), storage, scanner })).toBe(1);
+    expect((await db().selectFrom('document_versions').select(['malware_scan_status', 'sha256', 'size_bytes']).where('id', '=', versionId).executeTakeFirstOrThrow())).toMatchObject({ malware_scan_status: 'CLEAN', sha256, size_bytes: String(bytes.byteLength) });
+    expect((await db().selectFrom('integration_jobs').select('status').where('aggregate_id', '=', versionId).executeTakeFirstOrThrow()).status).toBe('SUCCEEDED');
+    expect(objects.has(`CLEAN:${storageKey}`)).toBe(true);
+    expect(objects.has(`QUARANTINE:${storageKey}`)).toBe(false);
+
+    await persistExpedienteTransition(db(), { institutionId, aggregateId: expedienteId, actorUserId: userId, correlationId: `${correlation}-close-final`, command: 'closeExpediente', fromStatus: 'OPEN', toStatus: 'CLOSED', eventData: { metadataValid: true, closureMetadata: { reason: 'Ready for closure' } }, authorizationContext: authorization });
+    expect((await db().selectFrom('expedientes').select(['status', 'closed_at']).where('id', '=', expedienteId).executeTakeFirstOrThrow())).toMatchObject({ status: 'CLOSED' });
+    expect((await db().selectFrom('expedientes').select('closed_at').where('id', '=', expedienteId).executeTakeFirstOrThrow()).closed_at).not.toBeNull();
+    expect(await db().selectFrom('expediente_state_events').select(['from_status', 'to_status', 'command']).where('expediente_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ from_status: 'OPEN', to_status: 'CLOSED', command: 'closeExpediente' }]));
+    expect(await db().selectFrom('expediente_state_events').select('command').where('expediente_id', '=', expedienteId).where('command', '=', 'closeExpediente').execute()).toHaveLength(1);
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', '=', 'expediente.closed').execute()).toHaveLength(1);
+    expect(await db().selectFrom('matters').select(['status', 'linked_expediente_id']).where('id', '=', matterId).executeTakeFirstOrThrow()).toMatchObject({ status: 'CLOSED', linked_expediente_id: expedienteId });
+    expect((await db().selectFrom('documents').select(['matter_id', 'expediente_id', 'current_version_id']).where('id', '=', documentId).executeTakeFirstOrThrow())).toMatchObject({ matter_id: null, expediente_id: expedienteId, current_version_id: versionId });
+    expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('CLEAN');
+    await expect(authorizeDocumentVersionUploadPreflight(db(), { institutionId, documentId, actorUserId: userId, authorizationContext: authorization })).rejects.toThrow(/not open/i);
+    expect(await db().selectFrom('archive_transfers').select('id').where('institution_id', '=', institutionId).where('expediente_id', '=', expedienteId).execute()).toHaveLength(0);
+    expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']);
+    expect((await db().selectFrom('expediente_state_events').select('to_status').where('expediente_id', '=', expedienteId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['OPEN', 'CLOSED']);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.created' }, { event_type: 'expediente.closed' }]));
   });
 });

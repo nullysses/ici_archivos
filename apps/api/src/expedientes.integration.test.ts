@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { applyFoundationMigrations, createDatabase, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, createDatabase, type Database } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createExpedienteApplicationService } from './expedientes.js';
@@ -16,6 +16,8 @@ const draftVersionA = '21000000-0000-4000-8000-000000000006';
 const retiredVersionA = '21000000-0000-4000-8000-000000000007';
 const typeB = '21000000-0000-4000-8000-000000000008';
 const publishedVersionB = '21000000-0000-4000-8000-000000000009';
+const documentClassification = '21000000-0000-4000-8000-00000000000c';
+const documentExpediente = '21000000-0000-4000-8000-00000000000d';
 
 describe('expediente core HTTP API with real PostgreSQL', () => {
   let container: StartedPostgreSqlContainer | undefined;
@@ -54,7 +56,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       institutionId: institutionA,
       issuer: 'https://issuer.example.test',
       subject: 'expediente-subject',
-      authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['expediente.create', 'records.read']), unitCapabilities: new Map() },
+      authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['expediente.create', 'records.read', 'expediente.edit_open']), unitCapabilities: new Map() },
     };
     app = await createApp({
       authenticateAccessToken: () => Promise.resolve(principal),
@@ -93,6 +95,24 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     const read = await api().inject({ method: 'GET', url: `/expedientes/${body.id}`, headers: { authorization: 'Bearer test' } });
     expect(read.statusCode).toBe(200);
     expect(read.json()).toMatchObject({ id: body.id, folio: body.folio, status: 'OPEN', expedienteTypeVersionId: publishedVersionA });
+  });
+
+  it('accepts an expediente-owned first document with a durable malware job and immutable classification snapshot', async () => {
+    await db().insertInto('access_classifications').values({ id: documentClassification, institution_id: institutionA, legal_classification: 'CONFIDENTIAL', operational_visibility: 'INSTITUTION', reason: 'Test classification' }).execute();
+    await db().insertInto('expedientes').values({ id: documentExpediente, institution_id: institutionA, folio: 'EXP-2026-000901', folio_year: 2026, sequence_number: 901, status: 'OPEN', expediente_type_version_id: publishedVersionA, metadata: { title: 'Document owner' }, opened_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
+    const documentId = '21000000-0000-4000-8000-00000000000e';
+    const versionId = '21000000-0000-4000-8000-00000000000f';
+    const accepted = await acceptExpedienteDocumentUploadAtomically(db(), {
+      institutionId: institutionA, expedienteId: documentExpediente, documentId, versionId,
+      documentType: 'resolution', title: 'Resolution', accessClassificationId: documentClassification,
+      originalFilename: 'resolution.pdf', detectedMimeType: 'application/pdf', declaredMimeType: 'application/pdf',
+      sizeBytes: 12, sha256: 'a'.repeat(64), storageKey: `v1/${institutionA}/${versionId}`, malwareScanStatus: 'PENDING_SCAN',
+      createdBy: userA, correlationId: 'expediente-document-acceptance', authorizationContext: principal.authorization,
+    });
+    expect(accepted.document).toMatchObject({ expediente_id: documentExpediente, matter_id: null, current_version_id: versionId, access_classification_id: documentClassification });
+    expect(accepted.version).toMatchObject({ version_number: 1, malware_scan_status: 'PENDING_SCAN', access_classification_snapshot: { legalClassification: 'CONFIDENTIAL', operationalVisibility: 'INSTITUTION' } });
+    expect(accepted.job).toMatchObject({ job_type: 'document.malware_scan', aggregate_type: 'document_version', aggregate_id: versionId, status: 'PENDING' });
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', documentId).orderBy('occurred_at').execute()).toEqual([{ event_type: 'document.created' }, { event_type: 'document.version_created' }]);
   });
 
   it('rejects unpublished, foreign, and invalid metadata before commit', async () => {

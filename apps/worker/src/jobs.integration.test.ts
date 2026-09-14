@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
@@ -241,7 +241,7 @@ describe('durable malware worker', () => {
       institutionId,
       institutionCapabilities: new Set<Capability>([
         'expediente.create', 'expediente.edit_open', 'expediente.close', 'records.read', 'document.version_open',
-        'matter.assign', 'matter.start', 'matter.resolve', 'matter.close',
+        'matter.assign', 'matter.start', 'matter.resolve', 'matter.close', 'archive_transfer.prepare', 'archive_transfer.approve',
       ]),
       unitCapabilities: new Map<string, ReadonlySet<Capability>>(),
     };
@@ -311,9 +311,41 @@ describe('durable malware worker', () => {
     expect((await db().selectFrom('documents').select(['matter_id', 'expediente_id', 'current_version_id']).where('id', '=', documentId).executeTakeFirstOrThrow())).toMatchObject({ matter_id: null, expediente_id: expedienteId, current_version_id: versionId });
     expect((await db().selectFrom('document_versions').select('malware_scan_status').where('id', '=', versionId).executeTakeFirstOrThrow()).malware_scan_status).toBe('CLEAN');
     await expect(authorizeDocumentVersionUploadPreflight(db(), { institutionId, documentId, actorUserId: userId, authorizationContext: authorization })).rejects.toThrow(/not open/i);
-    expect(await db().selectFrom('archive_transfers').select('id').where('institution_id', '=', institutionId).where('expediente_id', '=', expedienteId).execute()).toHaveLength(0);
     expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']);
-    expect((await db().selectFrom('expediente_state_events').select('to_status').where('expediente_id', '=', expedienteId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['OPEN', 'CLOSED']);
-    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.created' }, { event_type: 'expediente.closed' }]));
+
+    const transferId = '33000000-0000-4000-8000-000000000034';
+    const manifestId = '33000000-0000-4000-8000-000000000035';
+    const draft = await createArchiveTransferAndDraftManifestAtomically(db(), { institutionId, expedienteId, transferId, manifestId, actorUserId: userId, correlationId: `${correlation}-transfer-create`, authorizationContext: authorization });
+    expect(draft.transfer.status).toBe('DRAFT');
+    expect(draft.manifest.status).toBe('DRAFT');
+    expect((await db().selectFrom('expedientes').select('status').where('institution_id', '=', institutionId).where('id', '=', expedienteId).executeTakeFirstOrThrow()).status).toBe('TRANSFER_PENDING');
+    expect(await db().selectFrom('expediente_state_events').select(['from_status', 'to_status', 'command']).where('expediente_id', '=', expedienteId).where('command', '=', 'prepareTransfer').execute()).toEqual([{ from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer' }]);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', transferId).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }]));
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'transfer_manifest').where('aggregate_id', '=', manifestId).execute()).toEqual(expect.arrayContaining([{ event_type: 'transfer_manifest.created' }]));
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_prepared' }]));
+
+    const draftCanonicalJson = draft.manifest.canonical_json;
+    const canonical = JSON.parse(draftCanonicalJson) as { transferId: string; expedienteId: string; folio: string; closedAt: string | null; metadataSnapshot: { title: string }; documents: Array<{ documentId: string; versionId: string; versionNumber: number; filename: string; sha256: string; sizeBytes: string; mimeType: string; current: boolean }> };
+    expect(canonical).toMatchObject({ transferId, expedienteId, folio: expediente.folio, metadataSnapshot: { title: 'Integrated expediente' } });
+    expect(typeof canonical.closedAt).toBe('string');
+    expect(canonical.documents).toEqual([{ documentId, versionId, versionNumber: 1, filename: 'evidence.pdf', sha256, sizeBytes: String(bytes.byteLength), mimeType: 'application/pdf', current: true }]);
+
+    const approvedTransfer = await approveArchiveTransferManifestAtomically(db(), { institutionId, transferId, actorUserId: userId, correlationId: `${correlation}-transfer-approve`, authorizationContext: authorization });
+    const approvedSha256 = createHash('sha256').update(draftCanonicalJson).digest('hex');
+    expect(approvedTransfer.transfer.status).toBe('APPROVED');
+    expect(approvedTransfer.manifest.status).toBe('APPROVED');
+    expect(approvedTransfer.manifest.approved_by).toBe(userId);
+    expect(approvedTransfer.manifest.approved_at).not.toBeNull();
+    expect(approvedTransfer.manifest.canonical_json).toBe(draftCanonicalJson);
+    expect(approvedTransfer.manifest.sha256).toBe(approvedSha256);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'transfer_manifest').where('aggregate_id', '=', manifestId).execute()).toEqual(expect.arrayContaining([{ event_type: 'transfer_manifest.created' }, { event_type: 'transfer_manifest.approved' }]));
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', transferId).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }, { event_type: 'archive_transfer.approved' }]));
+    expect((await db().selectFrom('expedientes').select('status').where('institution_id', '=', institutionId).where('id', '=', expedienteId).executeTakeFirstOrThrow()).status).toBe('TRANSFER_PENDING');
+    expect((await db().selectFrom('archive_transfers').select('status').where('institution_id', '=', institutionId).where('id', '=', transferId).executeTakeFirstOrThrow()).status).toBe('APPROVED');
+    expect((await db().selectFrom('transfer_manifests').select(['status', 'canonical_json', 'sha256', 'approved_by', 'approved_at']).where('institution_id', '=', institutionId).where('id', '=', manifestId).executeTakeFirstOrThrow())).toMatchObject({ status: 'APPROVED', canonical_json: draftCanonicalJson, sha256: approvedSha256, approved_by: userId });
+    expect(await db().selectFrom('integration_jobs').select('id').where('institution_id', '=', institutionId).where('job_type', '=', 'archive_transfer.preserve').where('aggregate_id', '=', transferId).execute()).toHaveLength(0);
+    expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']);
+    expect((await db().selectFrom('expediente_state_events').select('to_status').where('expediente_id', '=', expedienteId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['OPEN', 'CLOSED', 'TRANSFER_PENDING']);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.created' }, { event_type: 'expediente.closed' }, { event_type: 'expediente.transfer_prepared' }]));
   });
 });

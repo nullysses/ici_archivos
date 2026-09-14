@@ -33,6 +33,7 @@ import {
 
 const DEFAULT_MAX_BYTES = 500n * 1024n * 1024n;
 const HARD_MAX_BYTES = 2n * 1024n * 1024n * 1024n;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface DocumentApplicationDependencies {
   readonly database: Database;
@@ -201,6 +202,7 @@ async function processUpload(request: FastifyRequest, dependencies: DocumentAppl
         const value = String(part.value).trim();
         const limit = part.fieldname === 'documentType' ? 200 : part.fieldname === 'title' ? 1000 : part.fieldname === 'replacementReason' ? 4000 : 100;
         if (value.length === 0 || value.length > limit) { if (upload !== undefined) await safeRemove(dependencies.storage, key); if (temporaryDirectory !== undefined) await rm(temporaryDirectory, { recursive: true, force: true }); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Multipart field is invalid'); }
+        if (part.fieldname === 'accessClassificationId' && !UUID_PATTERN.test(value)) { if (upload !== undefined) await safeRemove(dependencies.storage, key); if (temporaryDirectory !== undefined) await rm(temporaryDirectory, { recursive: true, force: true }); throw new DocumentHttpError(400, 'INVALID_REQUEST', 'Access classification is invalid'); }
         fields[part.fieldname] = value;
       }
       continue;

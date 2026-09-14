@@ -284,7 +284,9 @@ export async function authorizeDocumentVersionUploadPreflight(database: Database
       return 'MATTER';
     }
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', document.expediente_id).executeTakeFirst();
-    if (expediente?.status !== 'OPEN' || !canPerform(input.authorizationContext, 'document.version_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document version is not authorized');
+    if (expediente === undefined) throw new DomainInvariantError('DOCUMENT_NOT_FOUND', 'Document was not found');
+    if (expediente.status !== 'OPEN') throw new DomainInvariantError('EXPEDIENTE_NOT_OPEN', 'Expediente is not open');
+    if (!canPerform(input.authorizationContext, 'document.version_open')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente document version is not authorized');
     return 'EXPEDIENTE';
   });
 }

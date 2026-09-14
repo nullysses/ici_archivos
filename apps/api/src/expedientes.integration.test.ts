@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, createDatabase, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, authorizeDocumentVersionUploadPreflight, createDatabase, type Database } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createExpedienteApplicationService } from './expedientes.js';
@@ -56,7 +56,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       institutionId: institutionA,
       issuer: 'https://issuer.example.test',
       subject: 'expediente-subject',
-      authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['expediente.create', 'records.read', 'expediente.edit_open']), unitCapabilities: new Map() },
+      authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['expediente.create', 'records.read', 'expediente.edit_open', 'document.version_open']), unitCapabilities: new Map() },
     };
     app = await createApp({
       authenticateAccessToken: () => Promise.resolve(principal),
@@ -113,6 +113,12 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(accepted.version).toMatchObject({ version_number: 1, malware_scan_status: 'PENDING_SCAN', access_classification_snapshot: { legalClassification: 'PUBLIC', operationalVisibility: 'INSTITUTION' } });
     expect(accepted.job).toMatchObject({ job_type: 'document.malware_scan', aggregate_type: 'document_version', aggregate_id: versionId, status: 'PENDING' });
     expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', documentId).orderBy('occurred_at').execute()).toEqual([{ event_type: 'document.created' }, { event_type: 'document.version_created' }]);
+  });
+
+  it('reports a closed expediente as a state conflict during version preflight', async () => {
+    await db().updateTable('expedientes').set({ status: 'CLOSED' }).where('id', '=', documentExpediente).execute();
+    await expect(authorizeDocumentVersionUploadPreflight(db(), { institutionId: institutionA, documentId: '21000000-0000-4000-8000-00000000000e', actorUserId: userA, authorizationContext: principal.authorization })).rejects.toMatchObject({ code: 'EXPEDIENTE_NOT_OPEN' });
+    await db().updateTable('expedientes').set({ status: 'OPEN' }).where('id', '=', documentExpediente).execute();
   });
 
   it('rejects unpublished, foreign, and invalid metadata before commit', async () => {

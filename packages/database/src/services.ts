@@ -639,6 +639,11 @@ export async function persistExpedienteTransition(database: Database, input: Sta
     if (current === undefined) throw new Error('Expediente not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Expediente is ${current.status}, expected ${input.fromStatus}`);
     if (input.command === 'closeExpediente') {
+      if (input.authorizationContext === undefined || input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'expediente.close')) {
+        throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente closure is not authorized');
+      }
+    }
+    if (input.command === 'closeExpediente') {
       if (booleanEventValue(input.eventData, 'metadataValid') !== true) throw new DomainInvariantError('INVALID_METADATA', 'closeExpediente requires validated metadata');
       const invalidMatter = await transaction.selectFrom('matters').select('id').where('institution_id', '=', input.institutionId).where('linked_expediente_id', '=', input.aggregateId).where('status', 'not in', ['CLOSED', 'VOIDED']).executeTakeFirst();
       if (invalidMatter !== undefined) throw new DomainInvariantError('MATTERS_NOT_CLOSED', 'All linked matters must be CLOSED or VOIDED');

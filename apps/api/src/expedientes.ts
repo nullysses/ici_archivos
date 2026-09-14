@@ -4,10 +4,12 @@ import {
   ExpedienteCreateRequestSchema,
   ExpedienteIdParamsSchema,
   ExpedienteResponseSchema,
+  ExpedienteCloseRequestSchema,
   MatterErrorSchema,
   type ExpedienteCreateRequest,
   type ExpedienteIdParams,
   type ExpedienteResponse,
+  type ExpedienteCloseRequest,
 } from '@ici/contracts';
 import {
   canPerform,
@@ -17,14 +19,16 @@ import {
   type ExpedienteReadModel,
   type JsonObject,
   createExpedienteSchemaValidator,
+  persistExpedienteTransition,
 } from '@ici/database';
 import type { AuthenticateRequest } from './auth-plugin.js';
 import { createAuthenticationGuard } from './auth-plugin.js';
+import type { AuthenticatedPrincipal } from './auth.js';
 
 export class ExpedienteHttpError extends Error {
   public constructor(
-    readonly statusCode: 400 | 403 | 404,
-    readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'EXPEDIENTE_NOT_FOUND',
+    readonly statusCode: 400 | 403 | 404 | 409,
+    readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'EXPEDIENTE_NOT_FOUND' | 'INVALID_TRANSITION',
     message: string,
   ) {
     super(message);
@@ -41,6 +45,7 @@ export interface ExpedienteApplicationService {
     readonly request: ExpedienteCreateRequest;
   }): Promise<ExpedienteReadModel>;
   byId(institutionId: string, id: string): Promise<ExpedienteReadModel | undefined>;
+  close(input: { readonly id: string; readonly institutionId: string; readonly actorUserId: string; readonly correlationId: string; readonly request: ExpedienteCloseRequest; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ExpedienteReadModel>;
 }
 
 export function createExpedienteApplicationService(database: Database): ExpedienteApplicationService {
@@ -60,6 +65,23 @@ export function createExpedienteApplicationService(database: Database): Expedien
       return expediente;
     },
     byId: (institutionId, id) => findExpedienteById(database, institutionId, id),
+    async close(input) {
+      if (Object.keys(input.request.closureMetadata).length === 0) throw Object.assign(new Error('Closure metadata is required'), { code: 'INVALID_METADATA' });
+      await persistExpedienteTransition(database, {
+        institutionId: input.institutionId,
+        aggregateId: input.id,
+        actorUserId: input.actorUserId,
+        correlationId: input.correlationId,
+        command: 'closeExpediente',
+        fromStatus: 'OPEN',
+        toStatus: 'CLOSED',
+        eventData: { metadataValid: true, closureMetadata: input.request.closureMetadata as unknown as JsonObject },
+        authorizationContext: input.authorization,
+      });
+      const expediente = await findExpedienteById(database, input.institutionId, input.id);
+      if (expediente === undefined) throw new Error('Expediente closure did not produce an expediente');
+      return expediente;
+    },
   };
 }
 
@@ -72,7 +94,7 @@ function authenticatedPreHandler(authenticate: AuthenticateRequest) {
 
 export function installExpedienteRoutes(app: FastifyInstance, service: ExpedienteApplicationService, authenticate: AuthenticateRequest): void {
   const preHandler = authenticatedPreHandler(authenticate);
-  const errors = { 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } as const;
+  const errors = { 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema, 409: MatterErrorSchema } as const;
   app.post<{ Body: ExpedienteCreateRequest; Reply: ExpedienteResponse }>(
     '/expedientes',
     { preHandler, preValidation: (request, _reply, done) => {
@@ -106,6 +128,20 @@ export function installExpedienteRoutes(app: FastifyInstance, service: Expedient
       return reply.code(200).send(toExpedienteResponse(expediente));
     },
   );
+
+  app.post<{ Params: ExpedienteIdParams; Body: ExpedienteCloseRequest; Reply: ExpedienteResponse }>(
+    '/expedientes/:expedienteId/close',
+    { preHandler, schema: { params: ExpedienteIdParamsSchema, body: ExpedienteCloseRequestSchema, response: { 200: ExpedienteResponseSchema, ...errors } } },
+    async (request, reply) => {
+      const principal = request.principal;
+      try {
+        const closed = await service.close({ id: request.params.expedienteId, institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, request: request.body, authorization: principal.authorization });
+        return reply.code(200).send(toExpedienteResponse(closed));
+      } catch (error) {
+        throw mapExpedienteError(error);
+      }
+    },
+  );
 }
 
 function rejectUnknownFields(body: unknown): void {
@@ -120,6 +156,9 @@ function mapExpedienteError(error: unknown): ExpedienteHttpError {
   if (code === 'TYPE_VERSION_NOT_PUBLISHED' || code === 'INVALID_METADATA' || code === 'INVALID_SCHEMA' || code === 'CROSS_TENANT_REFERENCE') {
     return new ExpedienteHttpError(400, 'INVALID_REQUEST', 'Expediente request is invalid');
   }
+  if (code === 'NOT_AUTHORIZED') return new ExpedienteHttpError(403, 'FORBIDDEN', 'Access denied');
+  if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION' || code === 'MATTERS_NOT_CLOSED' || code === 'DOCUMENTS_NOT_CLEAN') return new ExpedienteHttpError(409, 'INVALID_TRANSITION', 'Expediente cannot be closed in its current state');
+  if (code === 'EXPEDIENTE_NOT_FOUND' || (error instanceof Error && error.message === 'Expediente not found')) return new ExpedienteHttpError(404, 'EXPEDIENTE_NOT_FOUND', 'Expediente not found');
   throw error;
 }
 

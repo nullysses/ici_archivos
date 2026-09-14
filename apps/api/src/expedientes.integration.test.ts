@@ -159,4 +159,34 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(new Set(sequences).size).toBe(5);
     expect(sequences).toEqual([3, 4, 5, 6, 7]);
   });
+
+  it('closes an expediente through the authenticated path and audits the closure atomically', async () => {
+    principal = {
+      ...principal,
+      authorization: {
+        ...principal.authorization,
+        institutionCapabilities: new Set(['expediente.create', 'records.read', 'expediente.close']),
+        unitCapabilities: new Map(),
+      },
+    };
+    const created = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Closure test' } } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json<{ id: string }>().id;
+
+    const closed = await api().inject({ method: 'POST', url: `/expedientes/${id}/close`, headers: { authorization: 'Bearer test' }, payload: { closureMetadata: { reason: 'Ready for transfer' } } });
+    expect(closed.statusCode).toBe(200);
+    expect(closed.json()).toMatchObject({ id, status: 'CLOSED' });
+
+    const row = await db().selectFrom('expedientes').select(['status', 'closed_at']).where('institution_id', '=', institutionA).where('id', '=', id).executeTakeFirstOrThrow();
+    expect(row.status).toBe('CLOSED');
+    expect(row.closed_at).not.toBeNull();
+    const stateEvent = await db().selectFrom('expediente_state_events').select(['command', 'event_data']).where('institution_id', '=', institutionA).where('expediente_id', '=', id).where('command', '=', 'closeExpediente').executeTakeFirstOrThrow();
+    expect(stateEvent.event_data).toMatchObject({ metadataValid: true, closureMetadata: { reason: 'Ready for transfer' } });
+    const audit = await db().selectFrom('audit_events').select(['event_type', 'event_data']).where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', id).where('event_type', '=', 'expediente.closed').executeTakeFirstOrThrow();
+    expect(audit.event_data).toMatchObject({ metadataValid: true, closureMetadata: { reason: 'Ready for transfer' } });
+
+    const repeated = await api().inject({ method: 'POST', url: `/expedientes/${id}/close`, headers: { authorization: 'Bearer test' }, payload: { closureMetadata: { reason: 'Again' } } });
+    expect(repeated.statusCode).toBe(409);
+    expect(repeated.json()).toMatchObject({ error: { code: 'INVALID_TRANSITION' } });
+  });
 });

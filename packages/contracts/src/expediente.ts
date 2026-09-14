@@ -25,3 +25,7 @@ export type ExpedienteResponse = Static<typeof ExpedienteResponseSchema>;
 export const ExpedienteIdParamsSchema = Type.Object({ expedienteId: Uuid }, { additionalProperties: false, $id: 'ExpedienteIdParams' });
 export type ExpedienteIdParams = Static<typeof ExpedienteIdParamsSchema>;
 
+export const ExpedienteCloseRequestSchema = Type.Object({
+  closureMetadata: JsonObject,
+}, { additionalProperties: false, $id: 'ExpedienteCloseRequest' });
+export type ExpedienteCloseRequest = Static<typeof ExpedienteCloseRequestSchema>;

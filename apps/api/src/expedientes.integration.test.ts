@@ -301,11 +301,15 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       const rejected = settled.find((result) => result.status === 'rejected');
       expect(rejected?.status).toBe('rejected');
-      if (rejected?.status === 'rejected') expect((rejected.reason as { code?: string }).code).not.toBe('40P01');
+      if (rejected?.status === 'rejected') {
+        const code = (rejected.reason as { code?: string }).code;
+        expect(['CANCELLATION_NOT_SAFE', 'INVALID_TRANSITION']).toContain(code);
+        expect(code).not.toBe('40P01');
+      }
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
     }
     const finalRaceStatus = (await db().selectFrom('archive_transfers').select('status').where('institution_id', '=', institutionA).where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status;
-    expect(['PRESERVING', 'CANCELLED']).toContain(finalRaceStatus);
+    expect(finalRaceStatus).toBe('PRESERVING');
   });
 });

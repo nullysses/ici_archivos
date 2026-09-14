@@ -219,6 +219,15 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(approvedBody.status).toBe('APPROVED');
     expect(approvedBody.manifest.status).toBe('APPROVED');
     expect(approvedBody.manifest.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const rejectExpedienteResponse = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Pre-approval rejection' } } });
+    const rejectExpedienteId = rejectExpedienteResponse.json<{ id: string }>().id;
+    await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', rejectExpedienteId).execute();
+    const rejectDraft = await api().inject({ method: 'POST', url: `/expedientes/${rejectExpedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
+    const rejectDraftBody = rejectDraft.json<{ id: string }>();
+    const rejectResponse = await api().inject({ method: 'POST', url: `/archive-transfers/${rejectDraftBody.id}/cancel`, headers: { authorization: 'Bearer test' }, payload: { reason: 'Reject before approval' } });
+    expect(rejectResponse.statusCode).toBe(200);
+    expect(await db().selectFrom('expediente_state_events').select('command').where('institution_id', '=', institutionA).where('expediente_id', '=', rejectExpedienteId).where('command', '=', 'rejectTransfer').execute()).toEqual([{ command: 'rejectTransfer' }]);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', rejectExpedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_rejected' }]));
     const cancelExpedienteResponse = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Cancellation source' } } });
     const cancelExpedienteId = cancelExpedienteResponse.json<{ id: string }>().id;
     await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', cancelExpedienteId).execute();
@@ -233,6 +242,8 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(cancelledJobs).toHaveLength(1);
     expect(cancelledJobs[0]?.status).toBe('CANCELLED');
     expect(cancelledJobs[0]?.id).toBeTruthy();
+    expect(await db().selectFrom('expediente_state_events').select('command').where('institution_id', '=', institutionA).where('expediente_id', '=', cancelExpedienteId).where('command', '=', 'cancelTransfer').execute()).toEqual([{ command: 'cancelTransfer' }]);
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', cancelExpedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_cancelled' }]));
     const submittedJob = await db().selectFrom('integration_jobs').selectAll().where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).executeTakeFirstOrThrow();
     expect(submittedJob).toMatchObject({ job_type: 'archive_transfer.preserve', aggregate_type: 'archive_transfer', status: 'PENDING', idempotency_key: `archive-transfer-preserve:${draftBody.id}` });
     expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status).toBe('APPROVED');
@@ -247,6 +258,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     await failArchiveTransferPreservationAtomically(db(), { institutionId: institutionA, transferId: draftBody.id, jobId: submittedJob.id, claimToken, reason: 'Temporary preservation outage', correlationId: 'transfer-failed' });
     expect(await db().selectFrom('integration_jobs').select(['status', 'last_error']).where('id', '=', submittedJob.id).executeTakeFirstOrThrow()).toMatchObject({ status: 'FAILED', last_error: 'Temporary preservation outage' });
     expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status).toBe('FAILED');
+    await expect(cancelArchiveTransferAtomically(db(), { institutionId: institutionA, transferId: draftBody.id, actorUserId: userA, reason: 'Cancel failed transfer', correlationId: 'transfer-cancel-failed', authorizationContext: principal.authorization })).rejects.toMatchObject({ code: 'CANCELLATION_NOT_SAFE' });
     const retried = await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/retry`, headers: { authorization: 'Bearer test' }, payload: {} });
     expect(retried.statusCode).toBe(200);
     expect(retried.json<{ status: string }>().status).toBe('SUBMITTED');

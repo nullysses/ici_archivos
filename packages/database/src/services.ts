@@ -24,6 +24,7 @@ const expedienteTransitions: Readonly<Record<string, { readonly from: readonly s
   reopenExpediente: { from: ['CLOSED'], to: 'OPEN' },
   prepareTransfer: { from: ['CLOSED'], to: 'TRANSFER_PENDING' },
   rejectTransfer: { from: ['TRANSFER_PENDING'], to: 'CLOSED' },
+  cancelTransfer: { from: ['TRANSFER_PENDING'], to: 'CLOSED' },
   completeTransfer: { from: ['TRANSFER_PENDING'], to: 'TRANSFERRED' },
   voidExpediente: { from: ['OPEN'], to: 'VOIDED' },
 };
@@ -43,6 +44,7 @@ const expedienteAuditEvents: Readonly<Record<string, string>> = {
   reopenExpediente: 'expediente.reopened',
   prepareTransfer: 'expediente.transfer_prepared',
   rejectTransfer: 'expediente.transfer_rejected',
+  cancelTransfer: 'expediente.transfer_cancelled',
   completeTransfer: 'expediente.transfer_completed',
   voidExpediente: 'expediente.voided',
 };
@@ -623,7 +625,7 @@ export async function findMatterNotesAuthorized(
 
 export async function persistExpedienteTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
   assertTransition(input.command, input.fromStatus, input.toStatus, expedienteTransitions);
-  const reason = input.command === 'reopenExpediente' || input.command === 'rejectTransfer' || input.command === 'voidExpediente' ? requireReason(input.reason, input.command) : input.reason;
+  const reason = input.command === 'reopenExpediente' || input.command === 'rejectTransfer' || input.command === 'cancelTransfer' || input.command === 'voidExpediente' ? requireReason(input.reason, input.command) : input.reason;
   await withAuditedTenantTransaction(database, {
     institutionId: input.institutionId,
     actorUserId: input.actorUserId,
@@ -1360,15 +1362,21 @@ export async function cancelArchiveTransferAtomically(database: Database, input:
     if ((transfer.status === 'APPROVED' || transfer.status === 'SUBMITTED') && job?.status === 'RUNNING') throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'Claimed preservation work cannot be cancelled safely');
     if (transfer.status === 'SUBMITTED' && job?.status !== 'PENDING') throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'Claimed preservation work cannot be cancelled safely');
     if (transfer.status === 'FAILED' && job?.status !== 'FAILED') throw new DomainInvariantError('INVALID_JOB_STATE', 'The failed transfer intent is inconsistent');
+    if (transfer.status === 'FAILED') {
+      const preservationStarted = await transaction.selectFrom('audit_events').select('id').where('institution_id', '=', input.institutionId).where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', input.transferId).where('event_type', '=', 'archive_transfer.preserving').executeTakeFirst();
+      if (preservationStarted !== undefined) throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'A failed transfer with started preservation cannot be cancelled safely');
+    }
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
     const cancelledAt = await databaseTimestamp(transaction, 'Archive transfer cancellation');
     await transaction.updateTable('archive_transfers').set({ status: 'CANCELLED', updated_at: cancelledAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
     if (job !== undefined && (job.status === 'PENDING' || job.status === 'FAILED')) await transaction.updateTable('integration_jobs').set({ status: 'CANCELLED', lease_expires_at: null, claim_token: null, updated_at: cancelledAt }).where('institution_id', '=', input.institutionId).where('id', '=', job.id).execute();
     await transaction.updateTable('expedientes').set({ status: 'CLOSED', updated_at: cancelledAt }).where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).where('status', '=', 'TRANSFER_PENDING').executeTakeFirstOrThrow();
-    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: transfer.expediente_id, from_status: 'TRANSFER_PENDING', to_status: 'CLOSED', command: 'rejectTransfer', actor_user_id: input.actorUserId, reason: input.reason, event_data: { transferId: input.transferId, reason: input.reason }, occurred_at: cancelledAt }).execute();
+    const expedienteCommand = transfer.status === 'DRAFT' ? 'rejectTransfer' : 'cancelTransfer';
+    const expedienteAuditEvent = transfer.status === 'DRAFT' ? 'expediente.transfer_rejected' : 'expediente.transfer_cancelled';
+    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: transfer.expediente_id, from_status: 'TRANSFER_PENDING', to_status: 'CLOSED', command: expedienteCommand, actor_user_id: input.actorUserId, reason: input.reason, event_data: { transferId: input.transferId, reason: input.reason, ...(expedienteCommand === 'cancelTransfer' ? { cancellation: true } : { rejection: true }) }, occurred_at: cancelledAt }).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.cancelled', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: transfer.status }, afterData: { status: 'CANCELLED' }, eventData: { reason: input.reason } });
-    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente.transfer_rejected', aggregateType: 'expediente', aggregateId: transfer.expediente_id, correlationId: input.correlationId, beforeData: { status: 'TRANSFER_PENDING' }, afterData: { status: 'CLOSED' }, eventData: { transferId: input.transferId, reason: input.reason } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: expedienteAuditEvent, aggregateType: 'expediente', aggregateId: transfer.expediente_id, correlationId: input.correlationId, beforeData: { status: 'TRANSFER_PENDING' }, afterData: { status: 'CLOSED' }, eventData: { transferId: input.transferId, reason: input.reason, ...(expedienteCommand === 'cancelTransfer' ? { cancellation: true } : { rejection: true }) } });
     return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).executeTakeFirstOrThrow() };
   });
 }

@@ -652,14 +652,27 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
       await tx.updateTable('matters').set({ resolution_metadata: { outcome: 'resolved' } }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
       await tx.updateTable('matters').set({ status: 'RESOLVED' }).where('id', 'in', [linkedMatter, unlinkedMatter]).execute();
     });
-    await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: linkedMatter, actorUserId: developmentSeedIds.adminUser, correlationId: 'close-linked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { linkedExpedienteId: '90000000-0000-4000-8000-000000000099', closureMetadata: { reason: 'Complete' } } });
+    const closureAuthorization = { userId: developmentSeedIds.adminUser, institutionId: institutionA, institutionCapabilities: new Set(['matter.close'] as const), unitCapabilities: new Map() };
+    await persistMatterTransition(app(), { institutionId: institutionA, aggregateId: linkedMatter, actorUserId: developmentSeedIds.adminUser, authorizationContext: closureAuthorization, correlationId: 'close-linked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { linkedExpedienteId: '90000000-0000-4000-8000-000000000099', closureMetadata: { reason: 'Complete' } } });
     const linked = await owner().selectFrom('matters').select(['status', 'linked_expediente_id']).where('id', '=', linkedMatter).executeTakeFirstOrThrow();
     expect(linked).toEqual({ status: 'CLOSED', linked_expediente_id: expedienteA });
     const event = await owner().selectFrom('matter_state_events').select('event_data').where('matter_id', '=', linkedMatter).executeTakeFirstOrThrow();
     expect(event.event_data).toMatchObject({ linkedExpedienteId: expedienteA });
     const audit = await owner().selectFrom('audit_events').select('event_data').where('aggregate_id', '=', linkedMatter).where('event_type', '=', 'matter.closed').executeTakeFirstOrThrow();
     expect(audit.event_data).toMatchObject({ linkedExpedienteId: expedienteA });
-    await expect(persistMatterTransition(app(), { institutionId: institutionA, aggregateId: unlinkedMatter, actorUserId: developmentSeedIds.adminUser, correlationId: 'close-unlinked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { closureMetadata: { reason: 'Complete' } } })).rejects.toThrow(/already be linked/i);
+    await expect(persistMatterTransition(app(), { institutionId: institutionA, aggregateId: unlinkedMatter, actorUserId: developmentSeedIds.adminUser, authorizationContext: closureAuthorization, correlationId: 'close-unlinked', command: 'closeMatter', fromStatus: 'RESOLVED', toStatus: 'CLOSED', eventData: { closureMetadata: { reason: 'Complete' } } })).rejects.toThrow(/already be linked/i);
     expect((await owner().selectFrom('matters').select('status').where('id', '=', unlinkedMatter).executeTakeFirstOrThrow()).status).toBe('RESOLVED');
+  });
+
+  it('does not expose generic matter transitions in place of hardened operations', async () => {
+    await expect(persistMatterTransition(app(), {
+      institutionId: institutionA,
+      aggregateId: matterA,
+      actorUserId: developmentSeedIds.adminUser,
+      correlationId: 'generic-matter-transition',
+      command: 'assignMatter',
+      fromStatus: 'RECEIVED',
+      toStatus: 'ASSIGNED',
+    })).rejects.toMatchObject({ code: 'TRANSITION_REQUIRES_HARDENED_OPERATION' });
   });
 });

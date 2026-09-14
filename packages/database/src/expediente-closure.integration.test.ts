@@ -73,4 +73,26 @@ describe('expediente closure retained-document invariant', () => {
     expect(await db().selectFrom('expediente_state_events').select('command').where('institution_id', '=', institutionId).where('expediente_id', '=', expedienteId).where('command', '=', 'closeExpediente').execute()).toHaveLength(1);
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', '=', 'expediente.closed').execute()).toHaveLength(1);
   });
+
+  it('does not expose generic transfer transitions in place of hardened operations', async () => {
+    await expect(persistExpedienteTransition(db(), {
+      institutionId,
+      aggregateId: expedienteId,
+      actorUserId: userId,
+      correlationId: 'ah4-generic-transfer-transition',
+      command: 'completeTransfer',
+      fromStatus: 'TRANSFER_PENDING',
+      toStatus: 'TRANSFERRED',
+    })).rejects.toMatchObject({ code: 'TRANSITION_REQUIRES_HARDENED_OPERATION' });
+    await expect(persistExpedienteTransition(db(), {
+      institutionId,
+      aggregateId: expedienteId,
+      actorUserId: userId,
+      correlationId: 'ah4-generic-prepare-transition',
+      command: 'prepareTransfer',
+      fromStatus: 'CLOSED',
+      toStatus: 'TRANSFER_PENDING',
+      eventData: { archivalMappingValid: true, draftManifestReady: true },
+    })).rejects.toMatchObject({ code: 'TRANSITION_REQUIRES_HARDENED_OPERATION' });
+  });
 });

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import type { Selectable } from 'kysely';
-import type { ArchiveTransferState, AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
+import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
 import type { ArchiveTransfersTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
@@ -388,6 +388,20 @@ export interface StateTransitionPersistenceInput {
   readonly authorizationContext?: AuthorizationContext;
 }
 
+function requireMatchingTransitionAuthorization(input: StateTransitionPersistenceInput): AuthorizationContext {
+  const authorization = input.authorizationContext;
+  if (input.actorUserId === undefined || authorization === undefined || authorization.institutionId !== String(input.institutionId) || authorization.userId !== input.actorUserId) {
+    throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', `${input.command} requires matching server-derived authorization context`);
+  }
+  return authorization;
+}
+
+function requireTransitionCapability(authorization: AuthorizationContext, capability: Capability, unitId?: string): void {
+  if (!canPerform(authorization, capability, unitId)) {
+    throw new DomainInvariantError('NOT_AUTHORIZED', `Transition requires ${capability}`);
+  }
+}
+
 export interface MatterAssignmentPersistenceInput {
   readonly institutionId: InstitutionId | string;
   readonly matterId: string;
@@ -481,6 +495,9 @@ export async function findMatterInbox(
 }
 
 export async function persistMatterTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
+  if (!['startMatter', 'resolveMatter', 'reopenMatter', 'closeMatter', 'voidMatter'].includes(input.command)) {
+    throw new DomainInvariantError('TRANSITION_REQUIRES_HARDENED_OPERATION', `${input.command} must use its lifecycle-specific operation`);
+  }
   assertTransition(input.command, input.fromStatus, input.toStatus, matterTransitions);
   if (input.command === 'startMatter' && input.eventData?.authorizedUnitIds !== undefined) throw new DomainInvariantError('INVALID_AUTHORIZATION_EVIDENCE', 'Authorization evidence must not be supplied in event data');
   const reason = input.command === 'reopenMatter' || input.command === 'voidMatter' ? requireReason(input.reason, input.command) : input.reason;
@@ -491,17 +508,16 @@ export async function persistMatterTransition(database: Database, input: StateTr
     const transitionAt = (await sql<{ occurred_at: Date }>`select clock_timestamp() as occurred_at`.execute(transaction)).rows[0]?.occurred_at;
     if (transitionAt === undefined) throw new Error('Transition timestamp was not generated');
     const effectiveUnit = await effectiveMatterUnit(transaction, String(input.institutionId), input.aggregateId, current.destination_unit_id);
-    const authorization = input.authorizationContext;
-    if (input.command === 'startMatter' || input.command === 'resolveMatter' || input.command === 'voidMatter') {
-      if (input.actorUserId === undefined || authorization === undefined || authorization.institutionId !== String(input.institutionId) || authorization.userId !== input.actorUserId) throw new DomainInvariantError('AUTHORIZATION_CONTEXT_REQUIRED', `${input.command} requires matching server-derived authorization context`);
-    }
-    if (input.command === 'resolveMatter' && !canPerform(authorization as AuthorizationContext, 'matter.resolve', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot resolve matters for the effective unit');
-    if (input.command === 'voidMatter' && !canPerform(authorization as AuthorizationContext, 'matter.void', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot void matters for the effective unit');
+    const authorization = requireMatchingTransitionAuthorization(input);
+    if (input.command === 'resolveMatter' && !canPerform(authorization, 'matter.resolve', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot resolve matters for the effective unit');
+    if (input.command === 'voidMatter' && !canPerform(authorization, 'matter.void', effectiveUnit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot void matters for the effective unit');
+    if (input.command === 'closeMatter') requireTransitionCapability(authorization, 'matter.close', effectiveUnit ?? undefined);
+    if (input.command === 'reopenMatter') requireTransitionCapability(authorization, 'matter.reopen', effectiveUnit ?? undefined);
     const changes: { status: MatterState; updated_at: Date; resolution_metadata?: JsonObject; closure_metadata?: JsonObject; linked_expediente_id?: string } = { status: input.toStatus as MatterState, updated_at: transitionAt };
     if (input.command === 'startMatter') {
       if (input.actorUserId === undefined) throw new DomainInvariantError('ACTOR_REQUIRED', 'startMatter requires an actor');
       const assignment = await currentMatterAssignment(transaction, String(input.institutionId), input.aggregateId);
-      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !canPerform(authorization as AuthorizationContext, 'matter.start', assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or authorized to start matters for the assigned unit');
+      if (assignment === undefined || (assignment.user_id !== input.actorUserId && !canPerform(authorization, 'matter.start', assignment.unit_id))) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor is not the current assignee or authorized to start matters for the assigned unit');
     }
     if (input.command === 'resolveMatter') {
       const resolution = objectEventValue(input.eventData, 'resolutionMetadata');
@@ -624,6 +640,14 @@ export async function findMatterNotesAuthorized(
 }
 
 export async function persistExpedienteTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
+  const transitionCapabilities: Readonly<Record<string, Capability>> = {
+    closeExpediente: 'expediente.close',
+    reopenExpediente: 'expediente.reopen',
+  };
+  const capability = transitionCapabilities[input.command];
+  if (capability === undefined) {
+    throw new DomainInvariantError('TRANSITION_REQUIRES_HARDENED_OPERATION', `${input.command} must use its lifecycle-specific operation`);
+  }
   assertTransition(input.command, input.fromStatus, input.toStatus, expedienteTransitions);
   const reason = input.command === 'reopenExpediente' || input.command === 'rejectTransfer' || input.command === 'cancelTransfer' || input.command === 'voidExpediente' ? requireReason(input.reason, input.command) : input.reason;
   await withAuditedTenantTransaction(database, {
@@ -640,11 +664,8 @@ export async function persistExpedienteTransition(database: Database, input: Sta
     const current = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).forUpdate().executeTakeFirst();
     if (current === undefined) throw new Error('Expediente not found');
     if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Expediente is ${current.status}, expected ${input.fromStatus}`);
-    if (input.command === 'closeExpediente') {
-      if (input.authorizationContext === undefined || input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'expediente.close')) {
-        throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente closure is not authorized');
-      }
-    }
+    const authorization = requireMatchingTransitionAuthorization(input);
+    requireTransitionCapability(authorization, capability);
     if (input.command === 'closeExpediente') {
       const closureMetadata = objectEventValue(input.eventData, 'closureMetadata');
       if (booleanEventValue(input.eventData, 'metadataValid') !== true || closureMetadata === undefined || Object.keys(closureMetadata).length === 0) throw new DomainInvariantError('INVALID_METADATA', 'closeExpediente requires non-empty validated metadata');
@@ -669,48 +690,6 @@ export async function persistExpedienteTransition(database: Database, input: Sta
     const now = new Date();
     await transaction.updateTable('expedientes').set({ status: input.toStatus as ExpedienteState, updated_at: now, ...(input.command === 'closeExpediente' ? { closed_at: now } : {}), ...(input.command === 'reopenExpediente' ? { closed_at: null } : {}) }).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).execute();
     await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.aggregateId, from_status: input.fromStatus, to_status: input.toStatus as ExpedienteState, command: input.command, ...(input.actorUserId === undefined ? {} : { actor_user_id: input.actorUserId }), ...(reason === undefined ? {} : { reason }), event_data: input.eventData ?? {}, occurred_at: now }).execute();
-  });
-}
-
-const archiveTransferTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
-  approveTransfer: { from: ['DRAFT'], to: 'APPROVED' },
-  submitTransfer: { from: ['APPROVED'], to: 'SUBMITTED' },
-  beginPreservation: { from: ['SUBMITTED'], to: 'PRESERVING' },
-  completeArchiveTransfer: { from: ['PRESERVING'], to: 'COMPLETED' },
-  failTransfer: { from: ['SUBMITTED', 'PRESERVING'], to: 'FAILED' },
-  retryFailedTransfer: { from: ['FAILED'], to: 'SUBMITTED' },
-  cancelTransfer: { from: ['DRAFT', 'APPROVED', 'SUBMITTED', 'PRESERVING', 'FAILED'], to: 'CANCELLED' },
-};
-
-const archiveTransferAuditEvents: Readonly<Record<string, string>> = {
-  approveTransfer: 'archive_transfer.approved',
-  submitTransfer: 'archive_transfer.submitted',
-  beginPreservation: 'archive_transfer.preserving',
-  completeArchiveTransfer: 'archive_transfer.completed',
-  failTransfer: 'archive_transfer.failed',
-  retryFailedTransfer: 'archive_transfer.retried',
-  cancelTransfer: 'archive_transfer.cancelled',
-};
-
-export async function persistArchiveTransferTransition(database: Database, input: StateTransitionPersistenceInput): Promise<void> {
-  assertTransition(input.command, input.fromStatus, input.toStatus, archiveTransferTransitions);
-  if ((input.command === 'failTransfer' || input.command === 'cancelTransfer')) requireReason(input.reason, input.command);
-  if (input.command === 'cancelTransfer' && booleanEventValue(input.eventData, 'cancellationIsSafe') !== true) throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'Transfer cancellation must be confirmed safe');
-  await withAuditedTenantTransaction(database, {
-    institutionId: input.institutionId,
-    actorUserId: input.actorUserId,
-    eventType: auditEventType(archiveTransferAuditEvents, input.command),
-    aggregateType: 'archive_transfer',
-    aggregateId: input.aggregateId,
-    correlationId: input.correlationId,
-    beforeData: { status: input.fromStatus },
-    afterData: { status: input.toStatus },
-    eventData: input.eventData,
-  }, async (transaction) => {
-    const current = await transaction.selectFrom('archive_transfers').select('status').where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).forUpdate().executeTakeFirst();
-    if (current === undefined) throw new Error('Archive transfer not found');
-    if (current.status !== input.fromStatus) throw new DomainInvariantError('STALE_STATE', `Archive transfer is ${current.status}, expected ${input.fromStatus}`);
-    await transaction.updateTable('archive_transfers').set({ status: input.toStatus as ArchiveTransferState, updated_at: new Date() }).where('institution_id', '=', input.institutionId).where('id', '=', input.aggregateId).execute();
   });
 }
 

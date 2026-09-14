@@ -644,7 +644,8 @@ export async function persistExpedienteTransition(database: Database, input: Sta
       }
     }
     if (input.command === 'closeExpediente') {
-      if (booleanEventValue(input.eventData, 'metadataValid') !== true) throw new DomainInvariantError('INVALID_METADATA', 'closeExpediente requires validated metadata');
+      const closureMetadata = objectEventValue(input.eventData, 'closureMetadata');
+      if (booleanEventValue(input.eventData, 'metadataValid') !== true || closureMetadata === undefined || Object.keys(closureMetadata).length === 0) throw new DomainInvariantError('INVALID_METADATA', 'closeExpediente requires non-empty validated metadata');
       const invalidMatter = await transaction.selectFrom('matters').select('id').where('institution_id', '=', input.institutionId).where('linked_expediente_id', '=', input.aggregateId).where('status', 'not in', ['CLOSED', 'VOIDED']).executeTakeFirst();
       if (invalidMatter !== undefined) throw new DomainInvariantError('MATTERS_NOT_CLOSED', 'All linked matters must be CLOSED or VOIDED');
       const unsafeDocument = await transaction.selectFrom('documents').leftJoin('document_versions', (join) => join.onRef('document_versions.institution_id', '=', 'documents.institution_id').onRef('document_versions.id', '=', 'documents.current_version_id')).select('documents.id').where('documents.institution_id', '=', input.institutionId).where('documents.expediente_id', '=', input.aggregateId).where((expression) => expression.or([expression('documents.current_version_id', 'is', null), expression('document_versions.malware_scan_status', '<>', 'CLEAN')])).executeTakeFirst();

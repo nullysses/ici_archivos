@@ -229,16 +229,13 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(cancelResponse.statusCode).toBe(200);
     expect(cancelResponse.json<{ status: string; manifest: { canonicalJson: string; status: string } }>()).toMatchObject({ status: 'CANCELLED', manifest: { status: 'APPROVED', canonicalJson: cancelDraftBody.manifest.canonicalJson } });
     expect((await db().selectFrom('expedientes').select('status').where('id', '=', cancelExpedienteId).executeTakeFirstOrThrow()).status).toBe('CLOSED');
-    expect(await db().selectFrom('integration_jobs').select('id').where('institution_id', '=', institutionA).where('aggregate_id', '=', cancelDraftBody.id).execute()).toHaveLength(0);
-    const submissions = await Promise.all([
-      api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} }),
-      api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} }),
-    ]);
-    expect(submissions.map((response) => response.statusCode).sort()).toEqual([200, 409]);
-    const submitted = submissions.find((response) => response.statusCode === 200);
-    expect(submitted?.json<{ status: string }>().status).toBe('SUBMITTED');
+    const cancelledJobs = await db().selectFrom('integration_jobs').select(['status', 'id']).where('institution_id', '=', institutionA).where('aggregate_id', '=', cancelDraftBody.id).execute();
+    expect(cancelledJobs).toHaveLength(1);
+    expect(cancelledJobs[0]?.status).toBe('CANCELLED');
+    expect(cancelledJobs[0]?.id).toBeTruthy();
     const submittedJob = await db().selectFrom('integration_jobs').selectAll().where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).executeTakeFirstOrThrow();
     expect(submittedJob).toMatchObject({ job_type: 'archive_transfer.preserve', aggregate_type: 'archive_transfer', status: 'PENDING', idempotency_key: `archive-transfer-preserve:${draftBody.id}` });
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status).toBe('APPROVED');
     const firstClaim = await claimArchiveTransferPreservationJobs(db(), institutionA, 1);
     const claimedJob = firstClaim.find((job) => job.id === submittedJob.id);
     expect(claimedJob?.status).toBe('RUNNING');
@@ -288,7 +285,6 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     const draft = await api().inject({ method: 'POST', url: `/expedientes/${expedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
     const draftBody = draft.json<{ id: string }>();
     expect((await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/approve`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
-    expect((await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
     const job = await db().selectFrom('integration_jobs').selectAll().where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).executeTakeFirstOrThrow();
     const [claimed] = await claimArchiveTransferPreservationJobs(db(), institutionA, 1);
     expect(claimed?.id).toBe(job.id);
@@ -309,6 +305,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
     }
-    expect((await db().selectFrom('archive_transfers').select('status').where('institution_id', '=', institutionA).where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status).toBe('PRESERVING');
+    const finalRaceStatus = (await db().selectFrom('archive_transfers').select('status').where('institution_id', '=', institutionA).where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status;
+    expect(['PRESERVING', 'CANCELLED']).toContain(finalRaceStatus);
   });
 });

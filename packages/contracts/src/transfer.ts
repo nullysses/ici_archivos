@@ -15,9 +15,6 @@ export type ArchiveTransferCreateRequest = Static<typeof ArchiveTransferCreateRe
 export const ArchiveTransferApproveRequestSchema = EmptyObject;
 export type ArchiveTransferApproveRequest = Static<typeof ArchiveTransferApproveRequestSchema>;
 
-export const ArchiveTransferSubmitRequestSchema = EmptyObject;
-export type ArchiveTransferSubmitRequest = Static<typeof ArchiveTransferSubmitRequestSchema>;
-
 export const ArchiveTransferRetryRequestSchema = EmptyObject;
 export type ArchiveTransferRetryRequest = Static<typeof ArchiveTransferRetryRequestSchema>;
 

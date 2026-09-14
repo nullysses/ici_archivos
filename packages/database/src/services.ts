@@ -1224,6 +1224,7 @@ export async function approveArchiveTransferManifestAtomically(database: Databas
     const approvedAt = await databaseTimestamp(transaction, 'Transfer approval');
     await transaction.updateTable('transfer_manifests').set({ status: 'APPROVED', sha256, approved_by: input.actorUserId, approved_at: approvedAt, updated_at: approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', manifest.id).execute();
     await transaction.updateTable('archive_transfers').set({ status: 'APPROVED', updated_at: approvedAt }).where('institution_id', '=', input.institutionId).where('id', '=', transfer.id).execute();
+    await transaction.insertInto('integration_jobs').values({ institution_id: input.institutionId, job_type: 'archive_transfer.preserve', aggregate_type: 'archive_transfer', aggregate_id: transfer.id, status: 'PENDING', idempotency_key: `archive-transfer-preserve:${transfer.id}`, correlation_id: input.correlationId, attempt_count: 0, payload: { transferId: transfer.id, expedienteId: transfer.expediente_id, manifestId: manifest.id, manifestSha256: sha256 } }).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'transfer_manifest.approved', aggregateType: 'transfer_manifest', aggregateId: manifest.id, correlationId: input.correlationId, beforeData: { status: 'DRAFT' }, afterData: { status: 'APPROVED', sha256 }, eventData: { transferId: transfer.id } });
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.approved', aggregateType: 'archive_transfer', aggregateId: transfer.id, correlationId: input.correlationId, beforeData: { status: 'DRAFT' }, afterData: { status: 'APPROVED', manifestId: manifest.id } });
     return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', transfer.id).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', manifest.id).executeTakeFirstOrThrow() };
@@ -1257,24 +1258,6 @@ async function loadArchivePreservationJob(transaction: DatabaseTransaction, inst
   return job;
 }
 
-export async function submitArchiveTransferAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorizationContext: AuthorizationContext }): Promise<ArchiveTransferReadModel> {
-  return withTenantTransaction(database, input.institutionId, async (transaction) => {
-    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.approve')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Transfer submission is not authorized');
-    const transfer = await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
-    if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
-    if (transfer.status !== 'APPROVED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved transfer may be submitted');
-    const expediente = await transaction.selectFrom('expedientes').select(['status']).where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
-    if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
-    const manifest = await loadApprovedArchiveManifest(transaction, String(input.institutionId), input.transferId);
-    const submittedAt = await databaseTimestamp(transaction, 'Archive transfer submission');
-    await transaction.updateTable('archive_transfers').set({ status: 'SUBMITTED', updated_at: submittedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
-    await transaction.insertInto('integration_jobs').values({ institution_id: input.institutionId, job_type: archivePreservationJobType, aggregate_type: archivePreservationAggregateType, aggregate_id: input.transferId, status: 'PENDING', idempotency_key: `archive-transfer-preserve:${input.transferId}`, correlation_id: input.correlationId, attempt_count: 0, payload: { transferId: input.transferId, expedienteId: transfer.expediente_id, manifestId: manifest.id, manifestSha256: manifest.sha256 } }).execute();
-    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.submitted', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'APPROVED' }, afterData: { status: 'SUBMITTED' }, eventData: { jobType: archivePreservationJobType } });
-    const updatedTransfer = await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirstOrThrow();
-    return { transfer: updatedTransfer, manifest };
-  });
-}
-
 export async function claimArchiveTransferPreservationJobs(database: Database, institutionId: InstitutionId | string, limit: number, now = new Date(), leaseSeconds = 300): Promise<readonly Selectable<IntegrationJobsTable>[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainInvariantError('INVALID_JOB_BATCH', 'Job claim limit must be between 1 and 100');
   if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 86_400) throw new DomainInvariantError('INVALID_JOB_LEASE', 'Job lease must be between 1 and 86400 seconds');
@@ -1296,12 +1279,16 @@ export async function claimArchiveTransferPreservationJobs(database: Database, i
 export async function beginArchiveTransferPreservationAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly correlationId: string }): Promise<void> {
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
     const transfer = await transaction.selectFrom('archive_transfers').select(['status', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
-    if (transfer?.status !== 'SUBMITTED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a submitted transfer may begin preservation');
+    if (transfer?.status !== 'APPROVED' && transfer?.status !== 'SUBMITTED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved or submitted transfer may begin preservation');
     await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
     await loadApprovedArchiveManifest(transaction, String(input.institutionId), input.transferId);
     const occurredAt = await databaseTimestamp(transaction, 'Archive preservation start');
+    if (transfer.status === 'APPROVED') {
+      await transaction.updateTable('archive_transfers').set({ status: 'SUBMITTED', updated_at: occurredAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
+      await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.submitted', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'APPROVED' }, afterData: { status: 'SUBMITTED' }, eventData: { jobId: input.jobId, jobType: archivePreservationJobType } });
+    }
     await transaction.updateTable('archive_transfers').set({ status: 'PRESERVING', updated_at: occurredAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.preserving', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'SUBMITTED' }, afterData: { status: 'PRESERVING' }, eventData: { jobId: input.jobId } });
   });
@@ -1370,6 +1357,7 @@ export async function cancelArchiveTransferAtomically(database: Database, input:
     if (transfer.status !== 'DRAFT' && transfer.status !== 'APPROVED' && transfer.status !== 'SUBMITTED' && transfer.status !== 'FAILED') throw new DomainInvariantError('INVALID_TRANSITION', 'Transfer cannot be cancelled in its current state');
     const job = await transaction.selectFrom('integration_jobs').selectAll().where('institution_id', '=', input.institutionId).where('idempotency_key', '=', `archive-transfer-preserve:${input.transferId}`).forUpdate().executeTakeFirst();
     if ((transfer.status === 'SUBMITTED' || transfer.status === 'FAILED') && job === undefined) throw new DomainInvariantError('INVALID_JOB_STATE', 'A submitted transfer requires a durable preservation intent');
+    if ((transfer.status === 'APPROVED' || transfer.status === 'SUBMITTED') && job?.status === 'RUNNING') throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'Claimed preservation work cannot be cancelled safely');
     if (transfer.status === 'SUBMITTED' && job?.status !== 'PENDING') throw new DomainInvariantError('CANCELLATION_NOT_SAFE', 'Claimed preservation work cannot be cancelled safely');
     if (transfer.status === 'FAILED' && job?.status !== 'FAILED') throw new DomainInvariantError('INVALID_JOB_STATE', 'The failed transfer intent is inconsistent');
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();

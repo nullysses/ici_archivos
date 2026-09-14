@@ -6,7 +6,6 @@ import {
   ArchiveTransferExpedienteParamsSchema,
   ArchiveTransferIdParamsSchema,
   ArchiveTransferResponseSchema,
-  ArchiveTransferSubmitRequestSchema,
   ArchiveTransferRetryRequestSchema,
   ArchiveTransferCancelRequestSchema,
   MatterErrorSchema,
@@ -15,7 +14,6 @@ import {
   type ArchiveTransferExpedienteParams,
   type ArchiveTransferIdParams,
   type ArchiveTransferResponse,
-  type ArchiveTransferSubmitRequest,
   type ArchiveTransferRetryRequest,
   type ArchiveTransferCancelRequest,
 } from '@ici/contracts';
@@ -26,7 +24,6 @@ import {
   createArchiveTransferAndDraftManifestAtomically,
   findArchiveTransferWithManifest,
   retryArchiveTransferAtomically,
-  submitArchiveTransferAtomically,
   type ArchiveTransferReadModel,
   type Database,
 } from '@ici/database';
@@ -48,7 +45,6 @@ export class TransferHttpError extends Error {
 export interface ArchiveTransferApplicationService {
   create(input: { readonly institutionId: string; readonly expedienteId: string; readonly transferId: string; readonly manifestId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   approve(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
-  submit(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   retry(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   cancel(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly reason: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   byId(institutionId: string, transferId: string): Promise<ArchiveTransferReadModel | undefined>;
@@ -66,13 +62,6 @@ export function createArchiveTransferApplicationService(database: Database): Arc
       authorizationContext: input.authorization,
     }),
     approve: (input) => approveArchiveTransferManifestAtomically(database, {
-      institutionId: input.institutionId,
-      transferId: input.transferId,
-      actorUserId: input.actorUserId,
-      correlationId: input.correlationId,
-      authorizationContext: input.authorization,
-    }),
-    submit: (input) => submitArchiveTransferAtomically(database, {
       institutionId: input.institutionId,
       transferId: input.transferId,
       actorUserId: input.actorUserId,
@@ -139,18 +128,6 @@ export function installArchiveTransferRoutes(app: FastifyInstance, service: Arch
       try {
         const principal = request.principal;
         const result = await service.approve({ transferId: request.params.transferId, institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, authorization: principal.authorization });
-        return reply.code(200).send(toArchiveTransferResponse(result));
-      } catch (error) { throw mapTransferError(error); }
-    },
-  );
-
-  app.post<{ Params: ArchiveTransferIdParams; Body: ArchiveTransferSubmitRequest; Reply: ArchiveTransferResponse }>(
-    '/archive-transfers/:transferId/submit',
-    { preHandler, schema: { params: ArchiveTransferIdParamsSchema, body: ArchiveTransferSubmitRequestSchema, response: { 200: ArchiveTransferResponseSchema, ...errors } } },
-    async (request, reply) => {
-      try {
-        const principal = request.principal;
-        const result = await service.submit({ transferId: request.params.transferId, institutionId: principal.institutionId, actorUserId: principal.userId, correlationId: request.id, authorization: principal.authorization });
         return reply.code(200).send(toArchiveTransferResponse(result));
       } catch (error) { throw mapTransferError(error); }
     },

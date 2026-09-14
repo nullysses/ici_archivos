@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, authorizeDocumentVersionUploadPreflight, beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, completeArchiveTransferPreservationAtomically, createDatabase, failArchiveTransferPreservationAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, authorizeDocumentVersionUploadPreflight, beginArchiveTransferPreservationAtomically, cancelArchiveTransferAtomically, claimArchiveTransferPreservationJobs, completeArchiveTransferPreservationAtomically, createDatabase, failArchiveTransferPreservationAtomically, type Database } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createExpedienteApplicationService } from './expedientes.js';
@@ -230,9 +230,13 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(cancelResponse.json<{ status: string; manifest: { canonicalJson: string; status: string } }>()).toMatchObject({ status: 'CANCELLED', manifest: { status: 'APPROVED', canonicalJson: cancelDraftBody.manifest.canonicalJson } });
     expect((await db().selectFrom('expedientes').select('status').where('id', '=', cancelExpedienteId).executeTakeFirstOrThrow()).status).toBe('CLOSED');
     expect(await db().selectFrom('integration_jobs').select('id').where('institution_id', '=', institutionA).where('aggregate_id', '=', cancelDraftBody.id).execute()).toHaveLength(0);
-    const submitted = await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} });
-    expect(submitted.statusCode).toBe(200);
-    expect(submitted.json<{ status: string }>().status).toBe('SUBMITTED');
+    const submissions = await Promise.all([
+      api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} }),
+      api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} }),
+    ]);
+    expect(submissions.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const submitted = submissions.find((response) => response.statusCode === 200);
+    expect(submitted?.json<{ status: string }>().status).toBe('SUBMITTED');
     const submittedJob = await db().selectFrom('integration_jobs').selectAll().where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).executeTakeFirstOrThrow();
     expect(submittedJob).toMatchObject({ job_type: 'archive_transfer.preserve', aggregate_type: 'archive_transfer', status: 'PENDING', idempotency_key: `archive-transfer-preserve:${draftBody.id}` });
     const firstClaim = await claimArchiveTransferPreservationJobs(db(), institutionA, 1);
@@ -267,5 +271,44 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }, { event_type: 'archive_transfer.approved' }]));
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_prepared' }]));
     expect(await db().selectFrom('expediente_state_events').select(['from_status', 'to_status', 'command']).where('institution_id', '=', institutionA).where('expediente_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer' }]));
+  });
+
+  it('serializes preservation begin against cancellation without a deadlock', async () => {
+    principal = {
+      ...principal,
+      authorization: {
+        ...principal.authorization,
+        institutionCapabilities: new Set(['expediente.create', 'records.read', 'archive_transfer.prepare', 'archive_transfer.approve']),
+        unitCapabilities: new Map(),
+      },
+    };
+    const created = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Lock ordering' } } });
+    const expedienteId = created.json<{ id: string }>().id;
+    await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', expedienteId).execute();
+    const draft = await api().inject({ method: 'POST', url: `/expedientes/${expedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
+    const draftBody = draft.json<{ id: string }>();
+    expect((await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/approve`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    expect((await api().inject({ method: 'POST', url: `/archive-transfers/${draftBody.id}/submit`, headers: { authorization: 'Bearer test' }, payload: {} })).statusCode).toBe(200);
+    const job = await db().selectFrom('integration_jobs').selectAll().where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).executeTakeFirstOrThrow();
+    const [claimed] = await claimArchiveTransferPreservationJobs(db(), institutionA, 1);
+    expect(claimed?.id).toBe(job.id);
+    const claimToken = claimed?.claim_token ?? '';
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const settled = await Promise.race([
+        Promise.allSettled([
+          beginArchiveTransferPreservationAtomically(db(), { institutionId: institutionA, transferId: draftBody.id, jobId: job.id, claimToken, correlationId: 'concurrent-begin' }),
+          cancelArchiveTransferAtomically(db(), { institutionId: institutionA, transferId: draftBody.id, actorUserId: userA, reason: 'Cancellation race', correlationId: 'concurrent-cancel', authorizationContext: principal.authorization }),
+        ]),
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('transfer lifecycle operations deadlocked')), 5000); }),
+      ]);
+      expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const rejected = settled.find((result) => result.status === 'rejected');
+      expect(rejected?.status).toBe('rejected');
+      if (rejected?.status === 'rejected') expect((rejected.reason as { code?: string }).code).not.toBe('40P01');
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+    expect((await db().selectFrom('archive_transfers').select('status').where('institution_id', '=', institutionA).where('id', '=', draftBody.id).executeTakeFirstOrThrow()).status).toBe('PRESERVING');
   });
 });

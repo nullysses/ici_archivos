@@ -1292,9 +1292,9 @@ export async function claimArchiveTransferPreservationJobs(database: Database, i
 
 export async function beginArchiveTransferPreservationAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly correlationId: string }): Promise<void> {
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
-    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const transfer = await transaction.selectFrom('archive_transfers').select(['status', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
     if (transfer?.status !== 'SUBMITTED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a submitted transfer may begin preservation');
+    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
     await loadApprovedArchiveManifest(transaction, String(input.institutionId), input.transferId);
@@ -1307,10 +1307,10 @@ export async function beginArchiveTransferPreservationAtomically(database: Datab
 export async function failArchiveTransferPreservationAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly reason: string; readonly correlationId: string }): Promise<void> {
   if (input.reason.trim().length === 0 || input.reason.length > 4000) throw new DomainInvariantError('INVALID_JOB_ERROR', 'Transfer failure reason must contain between 1 and 4000 characters');
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
-    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const transfer = await transaction.selectFrom('archive_transfers').select(['status', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
     if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
     if (transfer.status !== 'SUBMITTED' && transfer.status !== 'PRESERVING') throw new DomainInvariantError('INVALID_TRANSITION', 'Only submitted or preserving transfers may fail');
+    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
     const failedAt = await databaseTimestamp(transaction, 'Archive preservation failure');
@@ -1342,9 +1342,9 @@ export async function retryArchiveTransferAtomically(database: Database, input: 
 export async function completeArchiveTransferPreservationAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly correlationId: string; readonly approvedManifestPreserved: boolean; readonly aipStored: boolean; readonly archivalIntegrationCompleted: boolean }): Promise<void> {
   if (!input.approvedManifestPreserved || !input.aipStored || !input.archivalIntegrationCompleted) throw new DomainInvariantError('TRANSFER_NOT_COMPLETE', 'All preservation completion evidence is required');
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
-    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const transfer = await transaction.selectFrom('archive_transfers').select(['status', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
     if (transfer?.status !== 'PRESERVING') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a preserving transfer may complete');
+    await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const manifest = await loadApprovedArchiveManifest(transaction, String(input.institutionId), input.transferId);
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');

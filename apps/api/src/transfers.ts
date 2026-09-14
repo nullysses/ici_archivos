@@ -116,7 +116,7 @@ function mapTransferError(error: unknown): TransferHttpError {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new TransferHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'EXPEDIENTE_NOT_FOUND' || code === 'TRANSFER_NOT_FOUND' || code === 'MANIFEST_NOT_FOUND') return new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
-  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
+  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'TRANSFER_NOT_READY' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
   throw error;
 }
 

@@ -1121,6 +1121,10 @@ interface ManifestDocumentRow {
   readonly expedienteId: string | null;
 }
 
+function archivalMappingIsValid(value: JsonObject): boolean {
+  return Object.keys(value).length > 0;
+}
+
 function toCanonicalManifestDocument(document: ManifestDocumentRow): Record<string, unknown> {
   return {
     documentId: document.documentId,
@@ -1160,9 +1164,11 @@ export async function createArchiveTransferAndDraftManifestAtomically(database: 
     if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.prepare')) {
       throw new DomainInvariantError('NOT_AUTHORIZED', 'Transfer preparation is not authorized');
     }
-    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'metadata', 'closed_at']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'metadata', 'closed_at', 'expediente_type_version_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
     if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
     if (expediente.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente can be prepared for transfer');
+    const typeVersion = await transaction.selectFrom('expediente_type_versions').select('archival_mapping_json').where('institution_id', '=', input.institutionId).where('id', '=', expediente.expediente_type_version_id).executeTakeFirst();
+    if (typeVersion === undefined || !archivalMappingIsValid(typeVersion.archival_mapping_json)) throw new DomainInvariantError('TRANSFER_NOT_READY', 'The expediente archival mapping is not valid');
 
     const documents = await transaction.selectFrom('documents as d').leftJoin('matters as m', (join) => join.onRef('m.institution_id', '=', 'd.institution_id').onRef('m.id', '=', 'd.matter_id')).select([
       'd.id as documentId', 'd.matter_id as matterId', 'd.expediente_id as expedienteId', 'd.current_version_id as currentVersionId', 'd.created_at as createdAt',
@@ -1182,8 +1188,11 @@ export async function createArchiveTransferAndDraftManifestAtomically(database: 
     const createdAt = await databaseTimestamp(transaction, 'Archive transfer creation');
     await transaction.insertInto('archive_transfers').values({ id: input.transferId, institution_id: input.institutionId, expediente_id: input.expedienteId, status: 'DRAFT', created_by: input.actorUserId, created_at: createdAt, updated_at: createdAt }).execute();
     await transaction.insertInto('transfer_manifests').values({ id: input.manifestId, institution_id: input.institutionId, transfer_id: input.transferId, status: 'DRAFT', canonical_json: canonicalJson, created_at: createdAt, updated_at: createdAt }).execute();
+    await transaction.updateTable('expedientes').set({ status: 'TRANSFER_PENDING', updated_at: createdAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).where('status', '=', 'CLOSED').execute();
+    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.expedienteId, from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer', actor_user_id: input.actorUserId, event_data: { archivalMappingValid: true, draftManifestReady: true, transferId: input.transferId, manifestId: input.manifestId }, occurred_at: createdAt }).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.created', aggregateType: 'archive_transfer', aggregateId: input.transferId, correlationId: input.correlationId, afterData: { status: 'DRAFT', expedienteId: input.expedienteId, manifestId: input.manifestId } });
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'transfer_manifest.created', aggregateType: 'transfer_manifest', aggregateId: input.manifestId, correlationId: input.correlationId, afterData: { status: 'DRAFT', transferId: input.transferId } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente.transfer_prepared', aggregateType: 'expediente', aggregateId: input.expedienteId, correlationId: input.correlationId, beforeData: { status: 'CLOSED' }, afterData: { status: 'TRANSFER_PENDING' }, eventData: { transferId: input.transferId, manifestId: input.manifestId } });
     return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.manifestId).executeTakeFirstOrThrow() };
   });
 }
@@ -1204,7 +1213,7 @@ export async function approveArchiveTransferManifestAtomically(database: Databas
     if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
     if (transfer.status !== 'DRAFT') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a draft transfer may be approved');
     const expediente = await transaction.selectFrom('expedientes').select(['status']).where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
-    if (expediente?.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente may have an approved transfer');
+    if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'Only a transfer-pending expediente may have an approved transfer');
     const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).forUpdate().executeTakeFirst();
     if (manifest === undefined) throw new DomainInvariantError('MANIFEST_NOT_FOUND', 'Transfer manifest not found');
     if (manifest.status !== 'DRAFT') throw new DomainInvariantError('MANIFEST_IMMUTABLE', 'Only a draft transfer manifest may be approved');

@@ -45,7 +45,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     ]).execute();
     const schema = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false };
     await database.insertInto('expediente_type_versions').values([
-      { id: publishedVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: {}, published_at: new Date('2026-01-01T00:00:00.000Z') },
+      { id: publishedVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: { levelOfDescription: 'File' }, published_at: new Date('2026-01-01T00:00:00.000Z') },
       { id: draftVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 3, status: 'DRAFT', schema_json: schema, archival_mapping_json: {} },
       { id: retiredVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 2, status: 'DRAFT', schema_json: schema, archival_mapping_json: {} },
       { id: publishedVersionB, institution_id: institutionB, expediente_type_id: typeB, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: {}, published_at: new Date('2026-01-01T00:00:00.000Z') },
@@ -209,6 +209,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(draft.statusCode).toBe(201);
     const draftBody = draft.json<{ id: string; status: string; expedienteId: string; manifest: { id: string; status: string; canonicalJson: string; sha256: string | null; documents: unknown[] } }>();
     expect(draftBody).toMatchObject({ status: 'DRAFT', expedienteId, manifest: { status: 'DRAFT', sha256: null, documents: [] } });
+    expect((await db().selectFrom('expedientes').select('status').where('institution_id', '=', institutionA).where('id', '=', expedienteId).executeTakeFirst())?.status).toBe('TRANSFER_PENDING');
     const canonical = JSON.parse(draftBody.manifest.canonicalJson) as { expedienteId: string; folio: string; documents: unknown[] };
     expect(canonical).toMatchObject({ expedienteId, documents: [] });
 
@@ -220,5 +221,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(approvedBody.manifest.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect((await api().inject({ method: 'GET', url: `/archive-transfers/${draftBody.id}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(200);
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }, { event_type: 'archive_transfer.approved' }]));
+    expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_prepared' }]));
+    expect(await db().selectFrom('expediente_state_events').select(['from_status', 'to_status', 'command']).where('institution_id', '=', institutionA).where('expediente_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer' }]));
   });
 });

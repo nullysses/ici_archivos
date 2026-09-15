@@ -1,6 +1,16 @@
 import type { Job } from 'bullmq';
 import { createHash, randomUUID } from 'node:crypto';
-import { claimMalwareScanJobs, findMalwareScanTarget, recordMalwareScanResultAtomically, type Database } from '@ici/database';
+import {
+  beginArchiveTransferPreservationAtomically,
+  claimArchiveTransferPreservationJobs,
+  completeArchiveTransferPreservationAtomically,
+  failArchiveTransferPreservationAtomically,
+  findArchiveTransferWithManifest,
+  claimMalwareScanJobs,
+  findMalwareScanTarget,
+  recordMalwareScanResultAtomically,
+  type Database,
+} from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 
@@ -25,10 +35,40 @@ export interface MalwareScanWorkerDependencies {
   readonly scanner: MalwareScannerPort;
 }
 
+/**
+ * Boundary for the future preservation connector. The worker owns lifecycle
+ * and fencing; an implementation owns the external preservation work.
+ */
+export interface PreservationExecutionPort {
+  execute(input: PreservationExecutionInput): Promise<PreservationExecutionResult>;
+}
+
+export interface PreservationExecutionInput {
+  readonly institutionId: string;
+  readonly transferId: string;
+  readonly expedienteId: string;
+  readonly manifestId: string;
+  readonly manifestSha256: string;
+  readonly correlationId: string;
+}
+
+export interface PreservationExecutionResult {
+  readonly approvedManifestPreserved: boolean;
+  readonly aipStored: boolean;
+  readonly archivalIntegrationCompleted: boolean;
+}
+
+export interface ArchiveTransferWorkerDependencies {
+  readonly database: Database;
+  readonly preservation: PreservationExecutionPort;
+}
+
 export interface MalwareScanPollController {
   trigger(): void;
   stop(): Promise<void>;
 }
+
+export type IntegrationPollController = MalwareScanPollController;
 
 function boundedError(error: unknown): string {
   const message = error instanceof Error ? error.message : 'Malware scan failed';
@@ -73,6 +113,112 @@ export async function runMalwareScanOnce(dependencies: MalwareScanWorkerDependen
     const jobs = await claimMalwareScanJobs(dependencies.database, institution.id, limit, now, leaseSeconds);
     for (const job of jobs) {
       await processClaimedMalwareScanJob(dependencies, job);
+      processed += 1;
+    }
+  }
+  return processed;
+}
+
+function preservationFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Preservation execution failed';
+  return message.slice(0, 4000);
+}
+
+function hasCompletePreservationEvidence(result: PreservationExecutionResult): boolean {
+  return result.approvedManifestPreserved && result.aipStored && result.archivalIntegrationCompleted;
+}
+
+/** Processes one claimed archive-preservation intent using authoritative DB state. */
+export async function processClaimedArchiveTransferPreservationJob(
+  dependencies: ArchiveTransferWorkerDependencies,
+  job: {
+    readonly id: string;
+    readonly institution_id: string;
+    readonly aggregate_id: string;
+    readonly correlation_id: string;
+    readonly claim_token: string | null;
+  },
+): Promise<void> {
+  if (job.claim_token === null) return;
+
+  let started = false;
+  try {
+    await beginArchiveTransferPreservationAtomically(dependencies.database, {
+      institutionId: job.institution_id,
+      transferId: job.aggregate_id,
+      jobId: job.id,
+      claimToken: job.claim_token,
+      correlationId: job.correlation_id,
+    });
+    started = true;
+
+    // Payload fields are deliberately ignored. Reload the approved manifest
+    // and transfer from PostgreSQL after the fenced begin operation.
+    const authoritative = await findArchiveTransferWithManifest(dependencies.database, {
+      institutionId: job.institution_id,
+      transferId: job.aggregate_id,
+    });
+    if (authoritative === undefined || authoritative.manifest.sha256 === null) {
+      throw new Error('Approved preservation manifest is unavailable');
+    }
+
+    const result = await dependencies.preservation.execute({
+      institutionId: job.institution_id,
+      transferId: authoritative.transfer.id,
+      expedienteId: authoritative.transfer.expediente_id,
+      manifestId: authoritative.manifest.id,
+      manifestSha256: authoritative.manifest.sha256,
+      correlationId: job.correlation_id,
+    });
+    if (!hasCompletePreservationEvidence(result)) {
+      throw new Error('Preservation execution did not provide complete completion evidence');
+    }
+
+    await completeArchiveTransferPreservationAtomically(dependencies.database, {
+      institutionId: job.institution_id,
+      transferId: job.aggregate_id,
+      jobId: job.id,
+      claimToken: job.claim_token,
+      correlationId: job.correlation_id,
+      approvedManifestPreserved: result.approvedManifestPreserved,
+      aipStored: result.aipStored,
+      archivalIntegrationCompleted: result.archivalIntegrationCompleted,
+    });
+  } catch (error) {
+    // A stale/reclaimed token or a transfer cancelled by another actor is
+    // already fenced by PostgreSQL. In that case fail is expected to reject;
+    // the current owner (or terminal command) remains authoritative.
+    try {
+      await failArchiveTransferPreservationAtomically(dependencies.database, {
+        institutionId: job.institution_id,
+        transferId: job.aggregate_id,
+        jobId: job.id,
+        claimToken: job.claim_token,
+        reason: preservationFailureReason(error),
+        correlationId: job.correlation_id,
+      });
+    } catch {
+      if (started) {
+        // Do not mask the original execution/fencing error. A still-RUNNING
+        // job is recoverable through the established lease reclamation path.
+      }
+    }
+  }
+}
+
+/** Claims and processes one batch of archive-preservation intents per institution. */
+export async function runArchiveTransferPreservationOnce(
+  dependencies: ArchiveTransferWorkerDependencies,
+  limit = 10,
+  now = new Date(),
+  leaseSeconds = 300,
+): Promise<number> {
+  const institutions = await dependencies.database.selectFrom('institutions').select('id').where('status', '=', 'ACTIVE').execute();
+  let processed = 0;
+  for (const institution of institutions) {
+    const jobs = await claimArchiveTransferPreservationJobs(dependencies.database, institution.id, limit, now, leaseSeconds);
+    for (const job of jobs) {
+      await processClaimedArchiveTransferPreservationJob(dependencies, job);
       processed += 1;
     }
   }
@@ -124,7 +270,7 @@ function integrityCheckedStream(body: ReadableStream<Uint8Array>, expectedSizeBy
   };
 }
 
-export function createMalwareScanPollController(run: () => Promise<unknown>, intervalMs: number): MalwareScanPollController {
+export function createIntegrationPollController(run: () => Promise<unknown>, intervalMs: number): IntegrationPollController {
   let stopped = false;
   let active: Promise<unknown> | undefined;
   const trigger = (): void => {
@@ -142,3 +288,6 @@ export function createMalwareScanPollController(run: () => Promise<unknown>, int
     },
   };
 }
+
+export const createMalwareScanPollController = createIntegrationPollController;
+export const createArchiveTransferPollController = createIntegrationPollController;

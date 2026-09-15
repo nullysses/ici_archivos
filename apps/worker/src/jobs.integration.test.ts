@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimMalwareScanJobs, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimArchiveTransferPreservationJobs, claimMalwareScanJobs, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
-import { runMalwareScanOnce, type MalwareScanWorkerDependencies } from './jobs.js';
+import { runArchiveTransferPreservationOnce, runMalwareScanOnce, type ArchiveTransferWorkerDependencies, type MalwareScanWorkerDependencies, type PreservationExecutionInput } from './jobs.js';
 
 const institutionId = '33000000-0000-4000-8000-000000000001';
 const userId = '33000000-0000-4000-8000-000000000002';
@@ -45,6 +45,30 @@ describe('durable malware worker', () => {
   }, 120_000);
   afterAll(async () => { await database?.destroy(); await container?.stop(); });
   function db(): Database { if (database === undefined) throw new Error('database unavailable'); return database; }
+
+  async function createApprovedArchiveTransfer(sequence: number): Promise<{ readonly transferId: string; readonly expedienteId: string; readonly jobId: string }> {
+    const suffix = String(sequence).padStart(2, '0');
+    const typeId = `33000000-0000-4000-8000-0000000000${40 + sequence}`;
+    const typeVersionId = `33000000-0000-4000-8000-0000000001${suffix}`;
+    const expedienteId = `33000000-0000-4000-8000-0000000002${suffix}`;
+    const transferId = `33000000-0000-4000-8000-0000000003${suffix}`;
+    const manifestId = `33000000-0000-4000-8000-0000000004${suffix}`;
+    const authorization: AuthorizationContext = {
+      userId,
+      institutionId,
+      institutionCapabilities: new Set<Capability>(['expediente.create', 'expediente.close', 'records.read', 'archive_transfer.prepare', 'archive_transfer.approve']),
+      unitCapabilities: new Map<string, ReadonlySet<Capability>>(),
+    };
+    const validator = createExpedienteSchemaValidator();
+    await db().insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: `WORKER-${suffix}`, name: `Worker transfer ${suffix}`, status: 'ACTIVE' }).execute();
+    await db().insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }, archival_mapping_json: { levelOfDescription: 'File' }, published_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
+    await createExpedienteAtomically(db(), { id: expedienteId, institutionId, expedienteTypeVersionId: typeVersionId, metadata: { title: `Worker transfer ${suffix}` }, actorUserId: userId, correlationId: `worker-transfer-create-${suffix}` }, validator.validateMetadata);
+    await persistExpedienteTransition(db(), { institutionId, aggregateId: expedienteId, actorUserId: userId, correlationId: `worker-transfer-close-${suffix}`, command: 'closeExpediente', fromStatus: 'OPEN', toStatus: 'CLOSED', eventData: { metadataValid: true, closureMetadata: { reason: 'Ready for preservation worker' } }, authorizationContext: authorization });
+    await createArchiveTransferAndDraftManifestAtomically(db(), { institutionId, expedienteId, transferId, manifestId, actorUserId: userId, correlationId: `worker-transfer-draft-${suffix}`, authorizationContext: authorization });
+    await approveArchiveTransferManifestAtomically(db(), { institutionId, transferId, actorUserId: userId, correlationId: `worker-transfer-approve-${suffix}`, authorizationContext: authorization });
+    const job = await db().selectFrom('integration_jobs').select('id').where('institution_id', '=', institutionId).where('aggregate_id', '=', transferId).where('job_type', '=', 'archive_transfer.preserve').executeTakeFirstOrThrow();
+    return { transferId, expedienteId, jobId: job.id };
+  }
   async function createPendingVersion(versionId: string, documentId: string): Promise<string> {
     const key = `v1/${institutionId}/${versionId}`;
     const matterId = `33000000-0000-4000-8000-${versionId.slice(-12)}`;
@@ -347,5 +371,45 @@ describe('durable malware worker', () => {
     expect((await db().selectFrom('matter_state_events').select('to_status').where('matter_id', '=', matterId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['RECEIVED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']);
     expect((await db().selectFrom('expediente_state_events').select('to_status').where('expediente_id', '=', expedienteId).orderBy('occurred_at').orderBy('id').execute()).map((event) => event.to_status)).toEqual(['OPEN', 'CLOSED', 'TRANSFER_PENDING']);
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionId).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.created' }, { event_type: 'expediente.closed' }, { event_type: 'expediente.transfer_prepared' }]));
+  });
+
+  it('orchestrates an approved archive preservation intent through completion', async () => {
+    const fixture = await createApprovedArchiveTransfer(6);
+    const executions: PreservationExecutionInput[] = [];
+    const dependencies: ArchiveTransferWorkerDependencies = {
+      database: db(),
+      preservation: {
+        execute(input) {
+          executions.push(input);
+          return Promise.resolve({ approvedManifestPreserved: true, aipStored: true, archivalIntegrationCompleted: true });
+        },
+      },
+    };
+    expect(await runArchiveTransferPreservationOnce(dependencies)).toBeGreaterThanOrEqual(1);
+    expect(executions).toEqual(expect.arrayContaining([expect.objectContaining({ institutionId, transferId: fixture.transferId, expedienteId: fixture.expedienteId })]));
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('COMPLETED');
+    expect((await db().selectFrom('expedientes').select('status').where('id', '=', fixture.expedienteId).executeTakeFirstOrThrow()).status).toBe('TRANSFERRED');
+    expect((await db().selectFrom('integration_jobs').select(['status', 'claim_token']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'SUCCEEDED', claim_token: null });
+    expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_id', '=', fixture.transferId).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.submitted' }, { event_type: 'archive_transfer.preserving' }, { event_type: 'archive_transfer.completed' }]));
+  });
+
+  it('reclaims stale archive preservation work and fails execution durably', async () => {
+    const fixture = await createApprovedArchiveTransfer(7);
+    const firstClaim = await claimArchiveTransferPreservationJobs(db(), institutionId, 1, new Date('2045-01-01T00:00:00Z'), 1);
+    expect(firstClaim.find((job) => job.id === fixture.jobId)?.status).toBe('RUNNING');
+    let executionCount = 0;
+    const dependencies: ArchiveTransferWorkerDependencies = {
+      database: db(),
+      preservation: {
+        execute() {
+          executionCount += 1;
+          return Promise.reject(new Error('preservation connector unavailable'));
+        },
+      },
+    };
+    expect(await runArchiveTransferPreservationOnce(dependencies, 10, new Date('2045-01-01T00:00:02Z'), 1)).toBe(1);
+    expect(executionCount).toBe(1);
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('FAILED');
+    expect((await db().selectFrom('integration_jobs').select(['status', 'attempt_count', 'last_error']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'FAILED', attempt_count: 2, last_error: 'preservation connector unavailable' });
   });
 });

@@ -27,7 +27,7 @@ authoritative reconciliation is recorded in
 Next: continue the main roadmap with the separately scoped external integration
 adapters and deployment hardening.
 
-![ICI Archivos implementation status](status.png)
+![ICI Archivos implementation status](status-step-6-updated-v2.png)
 
 ## Prerequisites
 

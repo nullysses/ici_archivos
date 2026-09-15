@@ -705,6 +705,14 @@ This prevents a temporary AtoM/Archivematica outage from corrupting the business
 
 ## 16. Minimal API surface
 
+The list below is the target MVP surface. At the AH-6 checkpoint, the
+authenticated implementation is complete through Step 6: matter and notes
+operations, expediente creation/linkage/documents/closure, and transfer draft
+creation plus manifest approval are available. Transfer approval creates the
+durable preservation intent in the same transaction; there is intentionally no
+human `/submit` command. Preservation execution and external AtoM/Archivematica
+adapters remain later roadmap work.
+
 ```http
 POST   /matters
 GET    /matters/:id

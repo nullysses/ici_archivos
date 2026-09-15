@@ -9,17 +9,25 @@ description/access, and Archivematica digital preservation.
 
 ## Status
 
-**Step 5 — Matter workflow and document pipeline: complete and frozen.**
+**Step 6 — Expedientes and archival transfer boundary: complete and frozen.**
 
-The implemented path covers matter registration, assignment, workflow transitions,
-document intake and versioning, quarantine, durable malware scanning, CLEAN
-promotion and protected download. The local development stack includes PostgreSQL,
-MinIO and private-network ClamAV with the worker and migration jobs running in
-Docker Compose. Full register-to-resolve integration coverage is in place.
+The implemented path covers matter registration, assignment and workflow;
+expediente creation, linkage and closure; expediente-owned and matter-owned
+documents; quarantine, durable malware scanning, CLEAN promotion and protected
+download; and immutable transfer manifests through approval. Approval persists
+the durable preservation intent; external AtoM/Archivematica execution remains a
+future adapter boundary. The local development stack includes PostgreSQL, MinIO
+and private-network ClamAV with the worker and migration jobs running in Docker
+Compose.
 
-Next: **Step 6 — Expedientes and archival transfer.**
+The audit findings tranche AH-1 through AH-6 is complete and frozen. The
+authoritative reconciliation is recorded in
+[`docs/audit/AH-6-final-audit.md`](docs/audit/AH-6-final-audit.md).
 
-![ICI Archivos implementation status — Step 5 complete](status.png)
+Next: continue the main roadmap with the separately scoped external integration
+adapters and deployment hardening.
+
+![ICI Archivos implementation status](status.png)
 
 ## Prerequisites
 
@@ -97,11 +105,9 @@ assignment, `matters.destination_unit_id` remains the relevant unit. Matter
 reads, inbox visibility, and subsequent workflow authorization should converge
 on this rule.
 
-A policy decision is intentionally deferred before Step 6: assigning a specific
-user currently requires that the user be active and belong to the same
-institution, but does not prove an explicit association with the selected
-assignment unit. Decide whether a target user must have explicit
-membership/authorization in that unit (and which existing relation is
-authoritative for that proof), or whether assignment to any active user in the
-institution is intentionally permitted. This does not reopen the completed Step
-5 implementation tranche.
+Named assignment targets are required to be active users in the same institution
+with an active, explicit `user_role_assignments` row for exactly the selected
+unit at the authoritative assignment timestamp. An institution-wide role,
+previous matter assignment, email address, or unit hierarchy does not establish
+membership. This is the frozen pre-Step-6 decision and applies to both initial
+assignment and reassignment.

@@ -4,7 +4,8 @@
 `applyFoundationMigrations`; `002_foundation_hardening.sql` upgrades existing
 Step 4a databases and is also applied to fresh databases. Later forward-only
 migrations, including `010_malware_job_leases.sql`, are applied in
-order by the same runner. The runtime
+order by the same runner, including the forward-only expediente archival
+parent hardening in `012_expediente_archival_parent.sql`. The runtime
 application role must be provisioned
 separately and must not own these tables, be a superuser, or have
 `BYPASSRLS`. Runtime transactions set the local `app.institution_id` setting

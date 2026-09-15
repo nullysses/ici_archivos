@@ -167,6 +167,7 @@ export interface ExpedientesTable {
   sequence_number: BigIntColumn;
   status: 'OPEN' | 'CLOSED' | 'TRANSFER_PENDING' | 'TRANSFERRED' | 'VOIDED';
   expediente_type_version_id: string;
+  archival_parent_node_id: Nullable<string>;
   metadata: JsonColumn;
   opened_at: Timestamp;
   closed_at: Nullable<Date>;

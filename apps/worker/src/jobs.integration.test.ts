@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, claimMalwareScanJobs, completeArchiveTransferPreservationAtomically, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, failArchiveTransferPreservationAtomically, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, claimMalwareScanJobs, completeArchiveTransferPreservationAtomically, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, failArchiveTransferPreservationAtomically, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, setExpedienteArchivalParentAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
@@ -53,6 +53,7 @@ describe('durable malware worker', () => {
     const expedienteId = `33000000-0000-4000-8000-0000000002${suffix}`;
     const transferId = `33000000-0000-4000-8000-0000000003${suffix}`;
     const manifestId = `33000000-0000-4000-8000-0000000004${suffix}`;
+    const parentNodeId = `33000000-0000-4000-8000-${String(600 + sequence).padStart(12, '0')}`;
     const authorization: AuthorizationContext = {
       userId,
       institutionId,
@@ -62,7 +63,9 @@ describe('durable malware worker', () => {
     const validator = createExpedienteSchemaValidator();
     await db().insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: `WORKER-${suffix}`, name: `Worker transfer ${suffix}`, status: 'ACTIVE' }).execute();
     await db().insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }, archival_mapping_json: { levelOfDescription: 'File' }, published_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
+    await db().insertInto('archival_classification_nodes').values({ id: parentNodeId, institution_id: institutionId, node_type: 'SERIES', code: `WORKER-SERIES-${suffix}`, name: `Worker series ${suffix}`, metadata: {} }).execute();
     await createExpedienteAtomically(db(), { id: expedienteId, institutionId, expedienteTypeVersionId: typeVersionId, metadata: { title: `Worker transfer ${suffix}` }, actorUserId: userId, correlationId: `worker-transfer-create-${suffix}` }, validator.validateMetadata);
+    await setExpedienteArchivalParentAtomically(db(), { institutionId, expedienteId, archivalParentNodeId: parentNodeId, actorUserId: userId, correlationId: `worker-transfer-parent-${suffix}`, authorizationContext: authorization });
     await persistExpedienteTransition(db(), { institutionId, aggregateId: expedienteId, actorUserId: userId, correlationId: `worker-transfer-close-${suffix}`, command: 'closeExpediente', fromStatus: 'OPEN', toStatus: 'CLOSED', eventData: { metadataValid: true, closureMetadata: { reason: 'Ready for preservation worker' } }, authorizationContext: authorization });
     await createArchiveTransferAndDraftManifestAtomically(db(), { institutionId, expedienteId, transferId, manifestId, actorUserId: userId, correlationId: `worker-transfer-draft-${suffix}`, authorizationContext: authorization });
     await approveArchiveTransferManifestAtomically(db(), { institutionId, transferId, actorUserId: userId, correlationId: `worker-transfer-approve-${suffix}`, authorizationContext: authorization });
@@ -259,6 +262,7 @@ describe('durable malware worker', () => {
     const assignmentId = '33000000-0000-4000-8000-000000000031';
     const documentId = '33000000-0000-4000-8000-000000000032';
     const versionId = '33000000-0000-4000-8000-000000000033';
+    const parentNodeId = '33000000-0000-4000-8000-000000000036';
     const correlation = `step6-${expedienteId}`;
     const authorization: AuthorizationContext = {
       userId,
@@ -272,8 +276,10 @@ describe('durable malware worker', () => {
     const schema = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false };
     await db().insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'STEP6', name: 'Step 6 type', status: 'ACTIVE' }).execute();
     await db().insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: { levelOfDescription: 'File' }, published_at: new Date('2026-01-01T00:00:00.000Z') }).execute();
+    await db().insertInto('archival_classification_nodes').values({ id: parentNodeId, institution_id: institutionId, node_type: 'SERIES', code: 'STEP6-SERIES', name: 'Step 6 series', metadata: {} }).execute();
     const validator = createExpedienteSchemaValidator();
     await createExpedienteAtomically(db(), { id: expedienteId, institutionId, expedienteTypeVersionId: typeVersionId, metadata: { title: 'Integrated expediente' }, actorUserId: userId, correlationId: `${correlation}-create` }, validator.validateMetadata);
+    await setExpedienteArchivalParentAtomically(db(), { institutionId, expedienteId, archivalParentNodeId: parentNodeId, actorUserId: userId, correlationId: `${correlation}-parent`, authorizationContext: authorization });
     const expediente = await db().selectFrom('expedientes').selectAll().where('institution_id', '=', institutionId).where('id', '=', expedienteId).executeTakeFirstOrThrow();
     expect(expediente.status).toBe('OPEN');
     expect(expediente.folio).toMatch(/^EXP-[0-9]{4}-[0-9]{6}$/);

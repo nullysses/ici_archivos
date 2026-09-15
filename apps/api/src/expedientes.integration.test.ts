@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, authorizeDocumentVersionUploadPreflight, beginArchiveTransferPreservationAtomically, cancelArchiveTransferAtomically, claimArchiveTransferPreservationJobs, completeArchiveTransferPreservationAtomically, createDatabase, failArchiveTransferPreservationAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, applyFoundationMigrations, authorizeDocumentVersionUploadPreflight, beginArchiveTransferPreservationAtomically, cancelArchiveTransferAtomically, claimArchiveTransferPreservationJobs, completeArchiveTransferPreservationAtomically, createDatabase, failArchiveTransferPreservationAtomically, setExpedienteArchivalParentAtomically, type AuthorizationContext, type Database } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { createExpedienteApplicationService } from './expedientes.js';
@@ -19,6 +19,7 @@ const typeB = '21000000-0000-4000-8000-000000000008';
 const publishedVersionB = '21000000-0000-4000-8000-000000000009';
 const documentClassification = '21000000-0000-4000-8000-00000000000c';
 const documentExpediente = '21000000-0000-4000-8000-00000000000d';
+const archivalParentA = '21000000-0000-4000-8000-00000000000e';
 
 describe('expediente core HTTP API with real PostgreSQL', () => {
   let container: StartedPostgreSqlContainer | undefined;
@@ -50,6 +51,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       { id: retiredVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 2, status: 'DRAFT', schema_json: schema, archival_mapping_json: {} },
       { id: publishedVersionB, institution_id: institutionB, expediente_type_id: typeB, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: {}, published_at: new Date('2026-01-01T00:00:00.000Z') },
     ]).execute();
+    await database.insertInto('archival_classification_nodes').values({ id: archivalParentA, institution_id: institutionA, node_type: 'SERIES', code: 'EXP-SERIES', name: 'Expediente series', metadata: {} }).execute();
     await database.updateTable('expediente_type_versions').set({ status: 'PUBLISHED', published_at: new Date('2026-01-01T00:00:00.000Z') }).where('id', '=', retiredVersionA).execute();
     await database.updateTable('expediente_type_versions').set({ status: 'RETIRED' }).where('id', '=', retiredVersionA).execute();
     principal = {
@@ -83,6 +85,11 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
   function db(): Database {
     if (database === undefined) throw new Error('Database unavailable');
     return database;
+  }
+
+  async function assignArchivalParent(expedienteId: string, correlationId: string): Promise<void> {
+    const authorization: AuthorizationContext = { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['archive_transfer.prepare']), unitCapabilities: new Map() };
+    await setExpedienteArchivalParentAtomically(db(), { institutionId: institutionA, expedienteId, archivalParentNodeId: archivalParentA, actorUserId: userA, correlationId, authorizationContext: authorization });
   }
 
   it('creates and reads an expediente with a pinned published version atomically', async () => {
@@ -203,6 +210,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     };
     const created = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Transfer source' } } });
     const expedienteId = created.json<{ id: string }>().id;
+    await assignArchivalParent(expedienteId, 'transfer-source-parent');
     await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', expedienteId).execute();
 
     const draft = await api().inject({ method: 'POST', url: `/expedientes/${expedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
@@ -221,6 +229,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(approvedBody.manifest.sha256).toMatch(/^[0-9a-f]{64}$/);
     const rejectExpedienteResponse = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Pre-approval rejection' } } });
     const rejectExpedienteId = rejectExpedienteResponse.json<{ id: string }>().id;
+    await assignArchivalParent(rejectExpedienteId, 'reject-parent');
     await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', rejectExpedienteId).execute();
     const rejectDraft = await api().inject({ method: 'POST', url: `/expedientes/${rejectExpedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
     const rejectDraftBody = rejectDraft.json<{ id: string }>();
@@ -230,6 +239,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', rejectExpedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_rejected' }]));
     const cancelExpedienteResponse = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Cancellation source' } } });
     const cancelExpedienteId = cancelExpedienteResponse.json<{ id: string }>().id;
+    await assignArchivalParent(cancelExpedienteId, 'cancel-parent');
     await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', cancelExpedienteId).execute();
     const cancelDraft = await api().inject({ method: 'POST', url: `/expedientes/${cancelExpedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
     const cancelDraftBody = cancelDraft.json<{ id: string; manifest: { canonicalJson: string } }>();
@@ -293,6 +303,7 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     };
     const created = await api().inject({ method: 'POST', url: '/expedientes', headers: { authorization: 'Bearer test' }, payload: { expedienteTypeVersionId: publishedVersionA, metadata: { title: 'Lock ordering' } } });
     const expedienteId = created.json<{ id: string }>().id;
+    await assignArchivalParent(expedienteId, 'race-parent');
     await db().updateTable('expedientes').set({ status: 'CLOSED', closed_at: new Date('2026-09-14T00:00:00.000Z') }).where('institution_id', '=', institutionA).where('id', '=', expedienteId).execute();
     const draft = await api().inject({ method: 'POST', url: `/expedientes/${expedienteId}/archive-transfers`, headers: { authorization: 'Bearer test' }, payload: {} });
     const draftBody = draft.json<{ id: string }>();

@@ -365,6 +365,41 @@ export async function createExpedienteAtomically(database: Database, input: Crea
 
 export type ExpedienteReadModel = Selectable<ExpedientesTable>;
 
+export async function setExpedienteArchivalParentAtomically(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly expedienteId: string;
+  readonly archivalParentNodeId: string;
+  readonly actorUserId: string;
+  readonly correlationId: string;
+  readonly authorizationContext: AuthorizationContext;
+}): Promise<ExpedienteReadModel> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.prepare')) {
+      throw new DomainInvariantError('NOT_AUTHORIZED', 'Archival parent assignment is not authorized');
+    }
+    const expediente = await transaction.selectFrom('expedientes').select(['status', 'archival_parent_node_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
+    if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
+    if (expediente.status !== 'OPEN' && expediente.status !== 'CLOSED') throw new DomainInvariantError('ARCHIVAL_PARENT_IMMUTABLE', 'The archival parent cannot change after transfer preparation');
+    const parent = await transaction.selectFrom('archival_classification_nodes').select(['id', 'node_type']).where('institution_id', '=', input.institutionId).where('id', '=', input.archivalParentNodeId).forShare().executeTakeFirst();
+    if (parent === undefined || (parent.node_type !== 'SERIES' && parent.node_type !== 'SUBSERIES')) throw new DomainInvariantError('ARCHIVAL_PARENT_INVALID', 'The archival parent must be a SERIES or SUBSERIES in the same institution');
+    if (expediente.archival_parent_node_id === input.archivalParentNodeId) return transaction.selectFrom('expedientes').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).executeTakeFirstOrThrow();
+    const changedAt = await databaseTimestamp(transaction, 'Expediente archival parent assignment');
+    await transaction.updateTable('expedientes').set({ archival_parent_node_id: input.archivalParentNodeId, updated_at: changedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).execute();
+    await appendAuditEvent(transaction, {
+      institutionId: input.institutionId,
+      actorUserId: input.actorUserId,
+      eventType: expediente.archival_parent_node_id === null ? 'expediente.archival_parent_set' : 'expediente.archival_parent_changed',
+      aggregateType: 'expediente',
+      aggregateId: input.expedienteId,
+      correlationId: input.correlationId,
+      beforeData: { archivalParentNodeId: expediente.archival_parent_node_id },
+      afterData: { archivalParentNodeId: input.archivalParentNodeId },
+      eventData: { nodeType: parent.node_type },
+    });
+    return transaction.selectFrom('expedientes').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).executeTakeFirstOrThrow();
+  });
+}
+
 export async function findExpedienteById(database: Database, institutionId: InstitutionId | string, expedienteId: string): Promise<ExpedienteReadModel | undefined> {
   return withTenantTransaction(database, institutionId, (transaction) => transaction
     .selectFrom('expedientes')
@@ -1172,9 +1207,12 @@ export async function createArchiveTransferAndDraftManifestAtomically(database: 
     if (input.authorizationContext.institutionId !== String(input.institutionId) || input.authorizationContext.userId !== input.actorUserId || !canPerform(input.authorizationContext, 'archive_transfer.prepare')) {
       throw new DomainInvariantError('NOT_AUTHORIZED', 'Transfer preparation is not authorized');
     }
-    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'metadata', 'closed_at', 'expediente_type_version_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'metadata', 'closed_at', 'expediente_type_version_id', 'archival_parent_node_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).forUpdate().executeTakeFirst();
     if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
     if (expediente.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente can be prepared for transfer');
+    if (expediente.archival_parent_node_id === null) throw new DomainInvariantError('ARCHIVAL_PARENT_REQUIRED', 'An archival parent is required before transfer preparation');
+    const archivalParent = await transaction.selectFrom('archival_classification_nodes').select(['id', 'node_type']).where('institution_id', '=', input.institutionId).where('id', '=', expediente.archival_parent_node_id).forShare().executeTakeFirst();
+    if (archivalParent === undefined || (archivalParent.node_type !== 'SERIES' && archivalParent.node_type !== 'SUBSERIES')) throw new DomainInvariantError('ARCHIVAL_PARENT_INVALID', 'The archival parent must be a SERIES or SUBSERIES in the same institution');
     const typeVersion = await transaction.selectFrom('expediente_type_versions').select('archival_mapping_json').where('institution_id', '=', input.institutionId).where('id', '=', expediente.expediente_type_version_id).executeTakeFirst();
     if (typeVersion === undefined) throw new DomainInvariantError('TRANSFER_NOT_READY', 'The expediente archival mapping is not valid');
     assertValidArchivalMapping(typeVersion.archival_mapping_json);
@@ -1193,15 +1231,15 @@ export async function createArchiveTransferAndDraftManifestAtomically(database: 
         manifestDocuments.push({ documentId: document.documentId, versionId: version.versionId, versionNumber: version.versionNumber, filename: version.filename, sha256: version.sha256, sizeBytes: String(version.sizeBytes), mimeType: version.mimeType, current: document.currentVersionId === version.versionId, createdAt: version.createdAt, matterId: document.matterId, expedienteId: document.expedienteId });
       }
     }
-    const canonicalJson = canonicalManifestJson({ transferId: input.transferId, expedienteId: input.expedienteId, folio: expediente.folio, closedAt: expediente.closed_at === null ? null : new Date(expediente.closed_at).toISOString(), metadataSnapshot: expediente.metadata, documents: manifestDocuments.map(toCanonicalManifestDocument) });
+    const canonicalJson = canonicalManifestJson({ transferId: input.transferId, expedienteId: input.expedienteId, folio: expediente.folio, archivalParentNodeId: expediente.archival_parent_node_id, closedAt: expediente.closed_at === null ? null : new Date(expediente.closed_at).toISOString(), metadataSnapshot: expediente.metadata, documents: manifestDocuments.map(toCanonicalManifestDocument) });
     const createdAt = await databaseTimestamp(transaction, 'Archive transfer creation');
     await transaction.insertInto('archive_transfers').values({ id: input.transferId, institution_id: input.institutionId, expediente_id: input.expedienteId, status: 'DRAFT', created_by: input.actorUserId, created_at: createdAt, updated_at: createdAt }).execute();
     await transaction.insertInto('transfer_manifests').values({ id: input.manifestId, institution_id: input.institutionId, transfer_id: input.transferId, status: 'DRAFT', canonical_json: canonicalJson, created_at: createdAt, updated_at: createdAt }).execute();
     await transaction.updateTable('expedientes').set({ status: 'TRANSFER_PENDING', updated_at: createdAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.expedienteId).where('status', '=', 'CLOSED').execute();
-    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.expedienteId, from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer', actor_user_id: input.actorUserId, event_data: { archivalMappingValid: true, draftManifestReady: true, transferId: input.transferId, manifestId: input.manifestId }, occurred_at: createdAt }).execute();
+    await transaction.insertInto('expediente_state_events').values({ institution_id: input.institutionId, expediente_id: input.expedienteId, from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer', actor_user_id: input.actorUserId, event_data: { archivalMappingValid: true, draftManifestReady: true, archivalParentNodeId: expediente.archival_parent_node_id, transferId: input.transferId, manifestId: input.manifestId }, occurred_at: createdAt }).execute();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'archive_transfer.created', aggregateType: 'archive_transfer', aggregateId: input.transferId, correlationId: input.correlationId, afterData: { status: 'DRAFT', expedienteId: input.expedienteId, manifestId: input.manifestId } });
     await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'transfer_manifest.created', aggregateType: 'transfer_manifest', aggregateId: input.manifestId, correlationId: input.correlationId, afterData: { status: 'DRAFT', transferId: input.transferId } });
-    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente.transfer_prepared', aggregateType: 'expediente', aggregateId: input.expedienteId, correlationId: input.correlationId, beforeData: { status: 'CLOSED' }, afterData: { status: 'TRANSFER_PENDING' }, eventData: { transferId: input.transferId, manifestId: input.manifestId } });
+    await appendAuditEvent(transaction, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente.transfer_prepared', aggregateType: 'expediente', aggregateId: input.expedienteId, correlationId: input.correlationId, beforeData: { status: 'CLOSED' }, afterData: { status: 'TRANSFER_PENDING' }, eventData: { archivalParentNodeId: expediente.archival_parent_node_id, transferId: input.transferId, manifestId: input.manifestId } });
     return { transfer: await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirstOrThrow(), manifest: await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('id', '=', input.manifestId).executeTakeFirstOrThrow() };
   });
 }

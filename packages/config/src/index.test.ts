@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readApiConfig } from './index.js';
+import { readApiConfig, readAtomConfig } from './index.js';
 
 describe('readApiConfig', () => {
   it('parses an explicit API port', () => {
@@ -18,5 +18,18 @@ describe('readApiConfig', () => {
 
   it('requires HTTPS for production OIDC endpoints', () => {
     expect(() => readApiConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://db', OIDC_ISSUER: 'http://issuer.example', OIDC_AUDIENCE: 'ici', OIDC_JWKS_URI: 'http://issuer.example/jwks' })).toThrow('OIDC_ISSUER must use HTTPS');
+  });
+});
+
+describe('readAtomConfig', () => {
+  it('normalizes optional AtoM configuration and keeps it disabled by default', () => {
+    expect(readAtomConfig({})).toEqual({ baseUrl: undefined, apiKey: undefined, culture: 'en', requestTimeoutMs: 10_000 });
+    expect(readAtomConfig({ ATOM_BASE_URL: 'https://atom.example///', ATOM_API_KEY: 'key', ATOM_CULTURE: 'es', ATOM_REQUEST_TIMEOUT_MS: '2500' })).toEqual({ baseUrl: 'https://atom.example///', apiKey: 'key', culture: 'es', requestTimeoutMs: 2500 });
+  });
+
+  it('requires complete and valid AtoM configuration', () => {
+    expect(() => readAtomConfig({ ATOM_API_KEY: 'key' })).toThrow('ATOM_BASE_URL');
+    expect(() => readAtomConfig({ ATOM_BASE_URL: 'https://atom.example' })).toThrow('ATOM_API_KEY');
+    expect(() => readAtomConfig({ ATOM_BASE_URL: 'ftp://atom.example', ATOM_API_KEY: 'key' })).toThrow('ATOM_BASE_URL');
   });
 });

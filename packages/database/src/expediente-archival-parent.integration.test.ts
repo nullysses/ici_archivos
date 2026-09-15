@@ -3,11 +3,16 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { sql } from 'kysely';
 import {
   applyFoundationMigrations,
+  approveArchiveTransferManifestAtomically,
   createArchiveTransferAndDraftManifestAtomically,
   createDatabase,
   createExpedienteAtomically,
   createExpedienteSchemaValidator,
+  findAtomMapping,
+  loadApprovedExpedienteAtomSyncContext,
+  markAtomMappingFailed,
   persistExpedienteTransition,
+  saveAtomMapping,
   setExpedienteArchivalParentAtomically,
   type Database,
 } from './index.js';
@@ -83,6 +88,16 @@ describe('expediente archival parent precondition', () => {
     const draft = await createArchiveTransferAndDraftManifestAtomically(db(), { institutionId, expedienteId, transferId, manifestId, actorUserId: userId, correlationId: 'parent-prepare', authorizationContext: authorization });
     expect(draft.transfer.status).toBe('DRAFT');
     expect(JSON.parse(draft.manifest.canonical_json)).toMatchObject({ archivalParentNodeId: seriesId });
+    await saveAtomMapping(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: seriesId, atomInformationObjectId: '77', atomSlug: 'series-a', syncStatus: 'SYNCED' });
+    await approveArchiveTransferManifestAtomically(db(), { institutionId, transferId, actorUserId: userId, correlationId: 'parent-approve', authorizationContext: { ...authorization, institutionCapabilities: new Set(['archive_transfer.approve']) } });
+    const syncContext = await loadApprovedExpedienteAtomSyncContext(db(), { institutionId, transferId });
+    expect(syncContext.expedienteId).toBe(expedienteId);
+    expect(syncContext.expedienteFolio).toMatch(/^EXP-/);
+    expect(syncContext.archivalParentNodeId).toBe(seriesId);
+    expect((await findAtomMapping(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: seriesId }))?.atomSlug).toBe('series-a');
+    const failedMapping = await markAtomMappingFailed(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: seriesId });
+    expect(failedMapping).toMatchObject({ syncStatus: 'FAILED', atomInformationObjectId: '77', atomSlug: 'series-a' });
+    expect(await findAtomMapping(db(), { institutionId: foreignInstitutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: seriesId })).toBeUndefined();
     await expect(setExpedienteArchivalParentAtomically(db(), { institutionId, expedienteId, archivalParentNodeId: subseriesId, actorUserId: userId, correlationId: 'parent-after-prepare', authorizationContext: authorization })).rejects.toMatchObject({ code: 'ARCHIVAL_PARENT_IMMUTABLE' });
     await expect(db().updateTable('expedientes').set({ archival_parent_node_id: subseriesId }).where('institution_id', '=', institutionId).where('id', '=', expedienteId).execute()).rejects.toThrow(/cannot change after transfer preparation/i);
     expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', 'in', ['expediente.archival_parent_set', 'expediente.archival_parent_changed']).execute()).toHaveLength(3);

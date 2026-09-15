@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { ArchiveTransfersTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
+import type { ArchiveTransfersTable, AtomMappingsTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -1283,6 +1283,131 @@ export async function findArchiveTransferWithManifest(database: Database, input:
     if (manifest === undefined) return undefined;
     return { transfer, manifest };
   });
+}
+
+export const atomObjectTypes = {
+  archivalClassificationNode: 'ARCHIVAL_CLASSIFICATION_NODE',
+  expediente: 'EXPEDIENTE',
+} as const;
+
+export interface AtomMappingPersistenceRecord {
+  readonly institutionId: string;
+  readonly iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE' | 'EXPEDIENTE';
+  readonly iciObjectId: string;
+  readonly atomInformationObjectId: string | null;
+  readonly atomSlug: string | null;
+  readonly syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
+}
+
+function toAtomMappingRecord(row: Selectable<AtomMappingsTable>): AtomMappingPersistenceRecord {
+  return {
+    institutionId: row.institution_id,
+    iciObjectType: row.ici_object_type as AtomMappingPersistenceRecord['iciObjectType'],
+    iciObjectId: row.ici_object_id,
+    atomInformationObjectId: row.atom_information_object_id,
+    atomSlug: row.atom_slug,
+    syncStatus: row.sync_status,
+  };
+}
+
+/** Reads an external mapping in a short tenant-scoped transaction. */
+export async function findAtomMapping(database: Database, input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }): Promise<AtomMappingPersistenceRecord | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).executeTakeFirst();
+    return row === undefined ? undefined : toAtomMappingRecord(row);
+  });
+}
+
+/** Upserts only validated external identity; it never clears an existing identity. */
+export async function saveAtomMapping(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType'];
+  readonly iciObjectId: string;
+  readonly atomInformationObjectId: string;
+  readonly atomSlug: string;
+  readonly syncStatus: 'SYNCED' | 'FAILED';
+}): Promise<AtomMappingPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const syncedAt = await databaseTimestamp(transaction, 'AtoM mapping persistence');
+    const existing = await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).forUpdate().executeTakeFirst();
+    if (existing !== undefined && existing.atom_information_object_id !== null && (existing.atom_information_object_id !== input.atomInformationObjectId || existing.atom_slug !== input.atomSlug)) throw new DomainInvariantError('ATOM_MAPPING_CONFLICT', 'An ICI object already points to a different AtoM description');
+    const lastSyncedAt = input.syncStatus === 'SYNCED' ? syncedAt : existing?.last_synced_at ?? null;
+    await transaction.insertInto('atom_mappings').values({ institution_id: input.institutionId, ici_object_type: input.iciObjectType, ici_object_id: input.iciObjectId, atom_information_object_id: input.atomInformationObjectId, atom_slug: input.atomSlug, sync_status: input.syncStatus, last_synced_at: lastSyncedAt, created_at: syncedAt, updated_at: syncedAt }).onConflict((oc) => oc.columns(['institution_id', 'ici_object_type', 'ici_object_id']).doUpdateSet(({ eb }) => ({ atom_information_object_id: eb.ref('excluded.atom_information_object_id'), atom_slug: eb.ref('excluded.atom_slug'), sync_status: eb.ref('excluded.sync_status'), last_synced_at: eb.ref('excluded.last_synced_at'), updated_at: eb.ref('excluded.updated_at') }))).execute();
+    const row = await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).executeTakeFirstOrThrow();
+    return toAtomMappingRecord(row);
+  });
+}
+
+/** Records a retryable sync failure without erasing a previously validated
+ * external identity. */
+export async function markAtomMappingFailed(database: Database, input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }): Promise<AtomMappingPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const changedAt = await databaseTimestamp(transaction, 'AtoM mapping failure');
+    const existing = await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).forUpdate().executeTakeFirst();
+    if (existing === undefined) {
+      await transaction.insertInto('atom_mappings').values({ institution_id: input.institutionId, ici_object_type: input.iciObjectType, ici_object_id: input.iciObjectId, atom_information_object_id: null, atom_slug: null, sync_status: 'FAILED', last_synced_at: null, created_at: changedAt, updated_at: changedAt }).execute();
+    } else {
+      await transaction.updateTable('atom_mappings').set({ sync_status: 'FAILED', updated_at: changedAt }).where('institution_id', '=', input.institutionId).where('id', '=', existing.id).execute();
+    }
+    return toAtomMappingRecord(await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).executeTakeFirstOrThrow());
+  });
+}
+
+/** Structural adapter for @ici/integration-atom; network calls remain outside
+ * database transactions and this object keeps all reads tenant-scoped. */
+export function createAtomMappingStore(database: Database): {
+  readonly find: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }) => Promise<AtomMappingPersistenceRecord | undefined>;
+  readonly save: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string; readonly atomInformationObjectId: string; readonly atomSlug: string; readonly syncStatus: 'SYNCED' | 'FAILED' }) => Promise<AtomMappingPersistenceRecord>;
+  readonly markFailed: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }) => Promise<AtomMappingPersistenceRecord>;
+} {
+  return {
+    find: (input) => findAtomMapping(database, input),
+    save: (input) => saveAtomMapping(database, input),
+    markFailed: (input) => markAtomMappingFailed(database, input),
+  };
+}
+
+export interface ApprovedExpedienteAtomSyncContext {
+  readonly institutionId: string;
+  readonly transferId: string;
+  readonly expedienteId: string;
+  readonly expedienteFolio: string;
+  readonly archivalParentNodeId: string;
+  readonly canonicalManifestJson: string;
+  readonly manifestSha256: string;
+}
+
+/** Loads the approved manifest snapshot and its authoritative mapped parent.
+ * No transaction is held while an external adapter performs network I/O. */
+export async function loadApprovedExpedienteAtomSyncContext(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string }): Promise<ApprovedExpedienteAtomSyncContext> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const transfer = await transaction.selectFrom('archive_transfers').select(['id', 'expediente_id', 'status']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirst();
+    if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
+    if (transfer.status !== 'APPROVED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved transfer can be synchronized to AtoM');
+    const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).executeTakeFirst();
+    if (manifest === undefined || manifest.status !== 'APPROVED' || manifest.sha256 === null) throw new DomainInvariantError('MANIFEST_NOT_APPROVED', 'An approved manifest is required');
+    if (canonicalManifestSha256(manifest.canonical_json) !== manifest.sha256.toLowerCase()) throw new DomainInvariantError('MANIFEST_HASH_MISMATCH', 'The approved manifest hash does not match its canonical JSON');
+    let snapshot: unknown;
+    try { snapshot = JSON.parse(manifest.canonical_json) as unknown; } catch { throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest JSON is invalid'); }
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest must be an object');
+    const snapshotObject = snapshot as Record<string, unknown>;
+    if (snapshotObject.expedienteId !== transfer.expediente_id || typeof snapshotObject.archivalParentNodeId !== 'string') throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest does not contain the authoritative expediente parent snapshot');
+    const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'archival_parent_node_id']).where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).executeTakeFirst();
+    if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
+    if (expediente.status !== 'TRANSFER_PENDING' || expediente.archival_parent_node_id !== snapshotObject.archivalParentNodeId) throw new DomainInvariantError('MANIFEST_INVALID', 'The expediente parent no longer matches the approved manifest');
+    const parent = await transaction.selectFrom('archival_classification_nodes').select(['id', 'node_type']).where('institution_id', '=', input.institutionId).where('id', '=', expediente.archival_parent_node_id).executeTakeFirst();
+    if (parent === undefined || (parent.node_type !== 'SERIES' && parent.node_type !== 'SUBSERIES')) throw new DomainInvariantError('ARCHIVAL_PARENT_INVALID', 'The archival parent is not a valid Series or Subseries');
+    const parentMapping = await transaction.selectFrom('atom_mappings').select(['sync_status', 'atom_information_object_id', 'atom_slug']).where('institution_id', '=', input.institutionId).where('ici_object_type', '=', atomObjectTypes.archivalClassificationNode).where('ici_object_id', '=', parent.id).executeTakeFirst();
+    if (parentMapping?.sync_status !== 'SYNCED' || parentMapping.atom_information_object_id === null || parentMapping.atom_slug === null) throw new DomainInvariantError('ATOM_PARENT_MAPPING_REQUIRED', 'The archival parent must have a valid AtoM mapping before expediente synchronization');
+    return { institutionId: String(input.institutionId), transferId: transfer.id, expedienteId: expediente.id, expedienteFolio: expediente.folio, archivalParentNodeId: parent.id, canonicalManifestJson: manifest.canonical_json, manifestSha256: manifest.sha256 };
+  });
+}
+
+/** Structural adapter for the vendor package's approved-context loader. */
+export function createApprovedExpedienteAtomSyncContextLoader(database: Database): {
+  readonly load: (input: { readonly institutionId: string; readonly transferId: string }) => Promise<ApprovedExpedienteAtomSyncContext>;
+} {
+  return { load: (input) => loadApprovedExpedienteAtomSyncContext(database, input) };
 }
 
 const archivePreservationJobType = 'archive_transfer.preserve';

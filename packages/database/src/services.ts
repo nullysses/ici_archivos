@@ -1285,7 +1285,7 @@ export async function claimArchiveTransferPreservationJobs(database: Database, i
 export async function beginArchiveTransferPreservationAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly correlationId: string }): Promise<void> {
   await withTenantTransaction(database, input.institutionId, async (transaction) => {
     const transfer = await transaction.selectFrom('archive_transfers').select(['status', 'expediente_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).forUpdate().executeTakeFirst();
-    if (transfer?.status !== 'APPROVED' && transfer?.status !== 'SUBMITTED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved or submitted transfer may begin preservation');
+    if (transfer?.status !== 'APPROVED' && transfer?.status !== 'SUBMITTED' && transfer?.status !== 'PRESERVING') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved, submitted, or preserving transfer may begin preservation');
     await loadArchivePreservationJob(transaction, input.institutionId, input.transferId, input.jobId, input.claimToken);
     const expediente = await transaction.selectFrom('expedientes').select('status').where('institution_id', '=', input.institutionId).where('id', '=', transfer.expediente_id).forUpdate().executeTakeFirst();
     if (expediente?.status !== 'TRANSFER_PENDING') throw new DomainInvariantError('EXPEDIENTE_NOT_TRANSFER_PENDING', 'The expediente is not pending transfer');
@@ -1295,8 +1295,10 @@ export async function beginArchiveTransferPreservationAtomically(database: Datab
       await transaction.updateTable('archive_transfers').set({ status: 'SUBMITTED', updated_at: occurredAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
       await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.submitted', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'APPROVED' }, afterData: { status: 'SUBMITTED' }, eventData: { jobId: input.jobId, jobType: archivePreservationJobType } });
     }
-    await transaction.updateTable('archive_transfers').set({ status: 'PRESERVING', updated_at: occurredAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
-    await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.preserving', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'SUBMITTED' }, afterData: { status: 'PRESERVING' }, eventData: { jobId: input.jobId } });
+    if (transfer.status !== 'PRESERVING') {
+      await transaction.updateTable('archive_transfers').set({ status: 'PRESERVING', updated_at: occurredAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
+      await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.preserving', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: 'SUBMITTED' }, afterData: { status: 'PRESERVING' }, eventData: { jobId: input.jobId } });
+    }
   });
 }
 

@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'kysely';
-import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, claimArchiveTransferPreservationJobs, claimMalwareScanJobs, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
+import { acceptExpedienteDocumentUploadAtomically, acceptMatterDocumentUploadAtomically, approveArchiveTransferManifestAtomically, applyFoundationMigrations, assignMatterAtomically, authorizeDocumentVersionUploadPreflight, authorizeMatterDocumentVersionDownload, beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, claimMalwareScanJobs, completeArchiveTransferPreservationAtomically, createArchiveTransferAndDraftManifestAtomically, createDatabase, createExpedienteAtomically, createExpedienteSchemaValidator, failArchiveTransferPreservationAtomically, linkMatterToExpedienteAtomically, persistExpedienteTransition, persistMatterTransition, registerMatterAtomically, type Database } from '@ici/database';
 import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
-import { runArchiveTransferPreservationOnce, runMalwareScanOnce, type ArchiveTransferWorkerDependencies, type MalwareScanWorkerDependencies, type PreservationExecutionInput } from './jobs.js';
+import { processClaimedArchiveTransferPreservationJob, runArchiveTransferPreservationOnce, runMalwareScanOnce, type ArchiveTransferWorkerDependencies, type MalwareScanWorkerDependencies, type PreservationExecutionInput } from './jobs.js';
 
 const institutionId = '33000000-0000-4000-8000-000000000001';
 const userId = '33000000-0000-4000-8000-000000000002';
@@ -411,5 +411,38 @@ describe('durable malware worker', () => {
     expect(executionCount).toBe(1);
     expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('FAILED');
     expect((await db().selectFrom('integration_jobs').select(['status', 'attempt_count', 'last_error']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'FAILED', attempt_count: 2, last_error: 'preservation connector unavailable' });
+  });
+
+  it('resumes preserving work after a crash without duplicating the preserving audit', async () => {
+    const fixture = await createApprovedArchiveTransfer(8);
+    const firstClaim = await claimArchiveTransferPreservationJobs(db(), institutionId, 1, new Date('2045-01-01T00:00:00Z'), 1);
+    const firstJob = firstClaim.find((job) => job.id === fixture.jobId);
+    if (firstJob === undefined || firstJob.claim_token === null) throw new Error('initial preservation claim was not acquired');
+    await beginArchiveTransferPreservationAtomically(db(), { institutionId, transferId: fixture.transferId, jobId: fixture.jobId, claimToken: firstJob.claim_token, correlationId: 'worker-resume-begin-a' });
+    const secondClaim = await claimArchiveTransferPreservationJobs(db(), institutionId, 1, new Date('2045-01-01T00:00:02Z'), 1);
+    const reclaimedJob = secondClaim.find((job) => job.id === fixture.jobId);
+    if (reclaimedJob === undefined || reclaimedJob.claim_token === null) throw new Error('stale preservation claim was not reclaimed');
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('PRESERVING');
+    expect((await db().selectFrom('integration_jobs').select(['status', 'claim_token']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'RUNNING', claim_token: reclaimedJob.claim_token });
+    await beginArchiveTransferPreservationAtomically(db(), { institutionId, transferId: fixture.transferId, jobId: fixture.jobId, claimToken: reclaimedJob.claim_token, correlationId: 'worker-resume-begin-b' });
+
+    await expect(failArchiveTransferPreservationAtomically(db(), { institutionId, transferId: fixture.transferId, jobId: fixture.jobId, claimToken: firstJob.claim_token, reason: 'stale worker', correlationId: 'worker-resume-stale-fail' })).rejects.toThrow();
+    await expect(completeArchiveTransferPreservationAtomically(db(), { institutionId, transferId: fixture.transferId, jobId: fixture.jobId, claimToken: firstJob.claim_token, correlationId: 'worker-resume-stale-complete', approvedManifestPreserved: true, aipStored: true, archivalIntegrationCompleted: true })).rejects.toThrow();
+
+    let executionCount = 0;
+    await processClaimedArchiveTransferPreservationJob({
+      database: db(),
+      preservation: {
+        execute() {
+          executionCount += 1;
+          return Promise.resolve({ approvedManifestPreserved: true, aipStored: true, archivalIntegrationCompleted: true });
+        },
+      },
+    }, reclaimedJob);
+    expect(executionCount).toBe(1);
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('COMPLETED');
+    expect((await db().selectFrom('expedientes').select('status').where('id', '=', fixture.expedienteId).executeTakeFirstOrThrow()).status).toBe('TRANSFERRED');
+    expect((await db().selectFrom('integration_jobs').select(['status', 'claim_token', 'attempt_count']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'SUCCEEDED', claim_token: null, attempt_count: 2 });
+    expect((await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', fixture.transferId).where('event_type', '=', 'archive_transfer.preserving').execute())).toEqual([{ event_type: 'archive_transfer.preserving' }]);
   });
 });

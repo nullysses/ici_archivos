@@ -164,7 +164,7 @@ function mapTransferError(error: unknown): TransferHttpError {
   if (code === '40P01') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new TransferHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'EXPEDIENTE_NOT_FOUND' || code === 'TRANSFER_NOT_FOUND' || code === 'MANIFEST_NOT_FOUND') return new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
-  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'TRANSFER_NOT_READY' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE' || code === 'MANIFEST_NOT_APPROVED' || code === 'MANIFEST_HASH_MISMATCH' || code === 'INVALID_JOB_STATE' || code === 'CANCELLATION_NOT_SAFE' || code === 'TRANSFER_NOT_COMPLETE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
+  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'TRANSFER_NOT_READY' || code === 'INVALID_ARCHIVAL_MAPPING' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE' || code === 'MANIFEST_NOT_APPROVED' || code === 'MANIFEST_HASH_MISMATCH' || code === 'INVALID_JOB_STATE' || code === 'CANCELLATION_NOT_SAFE' || code === 'TRANSFER_NOT_COMPLETE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
   if (code === 'REASON_REQUIRED' || code === 'INVALID_JOB_ERROR') return new TransferHttpError(400, 'INVALID_REQUEST', 'Request validation failed');
   throw error;
 }

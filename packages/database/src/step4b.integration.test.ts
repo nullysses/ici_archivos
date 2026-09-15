@@ -515,13 +515,16 @@ describe('Step 4b PostgreSQL persistence foundation', () => {
     await expect(publishExpedienteTypeVersionAtomically(app(), { institutionId: institutionA, versionId: invalid, correlationId: 'invalid-schema', publishedAt: fixedNow }, (schema) => validator.validateDefinition(schema))).rejects.toThrow(/schema/i);
     await withTenantTransaction(owner(), institutionA, async (tx) => {
       await tx.deleteFrom('expediente_type_versions').where('id', '=', invalid).execute();
-      await tx.insertInto('expediente_type_versions').values({ id: valid, institution_id: institutionA, expediente_type_id: typeA, version_number: 2, status: 'DRAFT', schema_json: { type: 'object', required: ['subject'], properties: { subject: { type: 'string' } } }, archival_mapping_json: {}, created_at: fixedNow }).execute();
+      await tx.insertInto('expediente_type_versions').values({ id: valid, institution_id: institutionA, expediente_type_id: typeA, version_number: 2, status: 'DRAFT', schema_json: { type: 'object', required: ['subject'], properties: { subject: { type: 'string' } } }, archival_mapping_json: { levelOfDescription: 'File' }, created_at: fixedNow }).execute();
     });
     await publishExpedienteTypeVersionAtomically(app(), { institutionId: institutionA, versionId: valid, correlationId: 'valid-schema', publishedAt: fixedNow }, (schema) => validator.validateDefinition(schema));
     await withTenantTransaction(app(), institutionA, async (tx) => {
       expect(await tenantRepositories(tx, institutionA).expedienteTypes.versionById(valid)).toMatchObject({ status: 'PUBLISHED' });
       await expect(tx.updateTable('expediente_type_versions').set({ schema_json: {} }).where('id', '=', valid).execute()).rejects.toThrow(/immutable/i);
     });
+    const invalidMapping = '90000000-0000-4000-8000-000000000052';
+    await withTenantTransaction(owner(), institutionA, async (tx) => tx.insertInto('expediente_type_versions').values({ id: invalidMapping, institution_id: institutionA, expediente_type_id: typeA, version_number: 3, status: 'DRAFT', schema_json: { type: 'object' }, archival_mapping_json: {}, created_at: fixedNow }).execute());
+    await expect(publishExpedienteTypeVersionAtomically(app(), { institutionId: institutionA, versionId: invalidMapping, correlationId: 'invalid-mapping', publishedAt: fixedNow }, (schema) => validator.validateDefinition(schema))).rejects.toMatchObject({ code: 'INVALID_ARCHIVAL_MAPPING' });
   });
 
   it('creates and promotes versions for non-terminal matter-owned documents atomically', async () => {

@@ -1054,10 +1054,11 @@ export async function findMalwareScanTarget(database: Database, input: { readonl
 
 export async function publishExpedienteTypeVersionAtomically(database: Database, input: { readonly institutionId: InstitutionId | string; readonly versionId: string; readonly actorUserId?: string; readonly correlationId: string; readonly publishedAt: Date }, validateSchemaDefinition: (schema: JsonObject) => void): Promise<void> {
   await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'expediente_type_version.published', aggregateType: 'expediente_type_version', aggregateId: input.versionId, correlationId: input.correlationId, afterData: { status: 'PUBLISHED', publishedAt: input.publishedAt.toISOString() } }, async (transaction) => {
-    const draft = await transaction.selectFrom('expediente_type_versions').select(['status', 'schema_json']).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();
+    const draft = await transaction.selectFrom('expediente_type_versions').select(['status', 'schema_json', 'archival_mapping_json']).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).forUpdate().executeTakeFirst();
     if (draft === undefined) throw new Error('Expediente type version not found');
     if (draft.status !== 'DRAFT') throw new DomainInvariantError('VERSION_NOT_DRAFT', 'Only a draft version may be published');
     validateSchemaDefinition(draft.schema_json);
+    assertValidArchivalMapping(draft.archival_mapping_json);
     await transaction.updateTable('expediente_type_versions').set({ status: 'PUBLISHED', published_at: input.publishedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.versionId).execute();
   });
 }
@@ -1105,8 +1106,21 @@ interface ManifestDocumentRow {
   readonly expedienteId: string | null;
 }
 
-function archivalMappingIsValid(value: JsonObject): boolean {
-  return Object.keys(value).length > 0;
+/**
+ * The current ICI→AtoM boundary needs one explicit, stable mapping contract:
+ * an expediente is represented by an AtoM File description. Additional
+ * mapping vocabulary is intentionally deferred until the adapter contract is
+ * introduced; unknown keys are rejected rather than silently ignored.
+ */
+export function isValidArchivalMapping(value: JsonObject): boolean {
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === 'levelOfDescription' && value.levelOfDescription === 'File';
+}
+
+function assertValidArchivalMapping(value: JsonObject): void {
+  if (!isValidArchivalMapping(value)) {
+    throw new DomainInvariantError('INVALID_ARCHIVAL_MAPPING', 'Archival mapping must contain only levelOfDescription: File');
+  }
 }
 
 function toCanonicalManifestDocument(document: ManifestDocumentRow): Record<string, unknown> {
@@ -1122,16 +1136,26 @@ function toCanonicalManifestDocument(document: ManifestDocumentRow): Record<stri
   };
 }
 
-function canonicalManifestValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalManifestValue);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonicalManifestValue(entry)]));
-  }
-  return value;
+function compareCanonicalKeys(left: string, right: string): number {
+  // Relational comparison is a locale-independent UTF-16 code-unit order.
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function canonicalManifestJson(value: unknown): string {
-  return JSON.stringify(canonicalManifestValue(value));
+/** Serializes JSON with recursively sorted object keys and no locale/runtime ordering. */
+export function canonicalManifestJson(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new DomainInvariantError('INVALID_CANONICAL_VALUE', 'Manifest contains a non-JSON value');
+    return serialized;
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalManifestJson).join(',')}]`;
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => compareCanonicalKeys(left, right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalManifestJson(entry)}`).join(',')}}`;
+  }
+  throw new DomainInvariantError('INVALID_CANONICAL_VALUE', 'Manifest contains a non-JSON value');
 }
 
 /** Creates a closed-expediente transfer and its deterministic draft manifest atomically. */
@@ -1152,7 +1176,8 @@ export async function createArchiveTransferAndDraftManifestAtomically(database: 
     if (expediente === undefined) throw new DomainInvariantError('EXPEDIENTE_NOT_FOUND', 'Expediente not found');
     if (expediente.status !== 'CLOSED') throw new DomainInvariantError('EXPEDIENTE_NOT_CLOSED', 'Only a closed expediente can be prepared for transfer');
     const typeVersion = await transaction.selectFrom('expediente_type_versions').select('archival_mapping_json').where('institution_id', '=', input.institutionId).where('id', '=', expediente.expediente_type_version_id).executeTakeFirst();
-    if (typeVersion === undefined || !archivalMappingIsValid(typeVersion.archival_mapping_json)) throw new DomainInvariantError('TRANSFER_NOT_READY', 'The expediente archival mapping is not valid');
+    if (typeVersion === undefined) throw new DomainInvariantError('TRANSFER_NOT_READY', 'The expediente archival mapping is not valid');
+    assertValidArchivalMapping(typeVersion.archival_mapping_json);
 
     const documents = await transaction.selectFrom('documents as d').leftJoin('matters as m', (join) => join.onRef('m.institution_id', '=', 'd.institution_id').onRef('m.id', '=', 'd.matter_id')).select([
       'd.id as documentId', 'd.matter_id as matterId', 'd.expediente_id as expedienteId', 'd.current_version_id as currentVersionId', 'd.created_at as createdAt',

@@ -69,6 +69,7 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
       : undefined);
     const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
     await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await store.saveObservation({ institutionId: 'institution-a', archiveTransferId: 'archive-1', sipUuid });
     await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'aip_stored', aipUuid: sipUuid });
     await expect(service.discoverDip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).rejects.toMatchObject({ code: 'DIP_NOT_PROVABLE' });
   });
@@ -82,6 +83,7 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
         : undefined);
     const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
     await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await store.saveObservation({ institutionId: 'institution-a', archiveTransferId: 'archive-1', sipUuid });
     await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'aip_stored' });
     await expect(service.discoverDip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'dip_uploaded', dipUuid });
   });
@@ -90,7 +92,16 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
     const store = createInMemoryArchivematicaStore();
     const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch: validFetch() }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch: validFetch() }), store);
     await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await store.saveObservation({ institutionId: 'institution-a', archiveTransferId: 'archive-1', sipUuid });
     await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid })).rejects.toMatchObject({ code: 'ARCHIVEMATICA_AIP_SIP_MISMATCH', kind: 'CONFLICT' });
+  });
+
+  it('rejects a caller SIP/AIP pair that differs from the persisted SIP', async () => {
+    const store = createInMemoryArchivematicaStore();
+    const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch: validFetch() }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch: validFetch() }), store);
+    await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await store.saveObservation({ institutionId: 'institution-a', archiveTransferId: 'archive-1', sipUuid });
+    await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid: aipUuid, aipUuid })).rejects.toMatchObject({ code: 'ARCHIVEMATICA_IDENTITY_CONFLICT', kind: 'CONFLICT' });
   });
 
   it('does not resubmit after remote success when local persistence fails', async () => {

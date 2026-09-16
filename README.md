@@ -9,14 +9,16 @@ description/access, and Archivematica digital preservation.
 
 ## Status
 
-**Step 6 — Expedientes and archival transfer boundary: complete and frozen.**
+**Milestone 9 — AtoM adapter and archival hierarchy: complete and frozen.**
 
 The implemented path covers matter registration, assignment and workflow;
 expediente creation, linkage and closure; expediente-owned and matter-owned
 documents; quarantine, durable malware scanning, CLEAN promotion and protected
 download; and immutable transfer manifests through approval. Approval persists
-the durable preservation intent; external AtoM/Archivematica execution remains a
-future adapter boundary. The local development stack includes PostgreSQL, MinIO
+the durable preservation intent; AtoM archival descriptions and classification
+hierarchy synchronization are implemented with draft-only, tenant-scoped
+mappings. Archivematica remains the next external adapter boundary. The local
+development stack includes PostgreSQL, MinIO
 and private-network ClamAV with the worker and migration jobs running in Docker
 Compose.
 
@@ -24,10 +26,10 @@ The audit findings tranche AH-1 through AH-6 is complete and frozen. The
 authoritative reconciliation is recorded in
 [`docs/audit/AH-6-final-audit.md`](docs/audit/AH-6-final-audit.md).
 
-Next: continue the main roadmap with the separately scoped external integration
-adapters and deployment hardening.
+Next: continue the main roadmap with the separately scoped Archivematica adapter
+and deployment hardening.
 
-![ICI Archivos implementation status](status-step-6-updated-v2.png)
+![ICI Archivos implementation status](status-milestone-9-current.png)
 
 ## Prerequisites
 

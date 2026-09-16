@@ -62,6 +62,15 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
     await expect(service.observeTransfer({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid })).resolves.toMatchObject({ state: 'transferring' });
   });
 
+  it('marks ingest progress explicitly until Storage Service evidence is checked', async () => {
+    const store = createInMemoryArchivematicaStore();
+    const fetch = validFetch((url) => url.includes(`/api/ingest/status/${sipUuid}/`) ? response(200, { status: 'PROCESSING' }) : undefined);
+    const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
+    await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await store.saveObservation({ institutionId: 'institution-a', archiveTransferId: 'archive-1', sipUuid });
+    await expect(service.observeIngest({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid })).resolves.toMatchObject({ state: 'ingesting', ingestComplete: false });
+  });
+
   it('requires authoritative AIP Storage Service evidence', async () => {
     const store = createInMemoryArchivematicaStore();
     const fetch = validFetch((url) => url.includes(`/api/v2/file/${sipUuid}/`)

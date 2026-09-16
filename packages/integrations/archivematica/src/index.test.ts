@@ -27,12 +27,12 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
   it('uses API-key auth and beta package payload with encoded transfer source', async () => {
     let request: { url: string; init: RequestInit | undefined } | undefined;
     const dashboard = new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch: validFetch((url, init) => { if (url.includes('/api/v2beta/package')) { request = { url, init }; return response(202, { id: transferUuid }); } return undefined; }) });
-    const result = await dashboard.startTransfer({ name: 'ici-transfer', accession: 'archive-1', source: { locationUuid, relativePath: 'folder/file' }, processingConfiguration: 'automated' });
+    const result = await dashboard.startTransfer({ name: 'ici-transfer', accession: 'archive-1', source: { locationUuid, relativePath: 'folder/file' }, processingConfiguration: 'automated', accessSystemId: 'expediente-file-slug' });
     expect(result.transferUuid).toBe(transferUuid);
     expect(request?.init?.headers).toMatchObject({ Authorization: 'ApiKey ici:secret', 'Content-Type': 'application/json' });
     const rawBody = request?.init?.body;
     if (typeof rawBody !== 'string') throw new Error('Expected JSON body');
-    expect(JSON.parse(rawBody)).toMatchObject({ name: 'ici-transfer', accession: 'archive-1', processing_config: 'automated', path: Buffer.from(`${locationUuid}:folder/file`).toString('base64'), auto_approve: true });
+    expect(JSON.parse(rawBody)).toMatchObject({ name: 'ici-transfer', accession: 'archive-1', processing_config: 'automated', path: Buffer.from(`${locationUuid}:folder/file`).toString('base64'), auto_approve: true, access_system_id: 'expediente-file-slug' });
   });
 
   it('validates transfer source and processing configuration before submission', async () => {

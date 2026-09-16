@@ -157,7 +157,7 @@ export class ProductionPreservationExecution implements PreservationExecutionPor
         throw error;
       }
     }
-    const record = await this.dependencies.archivematica.submit({ institutionId: input.institutionId, archiveTransferId: input.transferId, source });
+    const record = await this.dependencies.archivematica.submit({ institutionId: input.institutionId, archiveTransferId: input.transferId, source, accessSystemId: fileSlug });
     if (record.archivematicaTransferUuid === null) throw new Error('Archivematica transfer identity is unavailable');
     const transferObservation = await this.dependencies.archivematica.observeTransfer({ institutionId: input.institutionId, archiveTransferId: input.transferId, transferUuid: record.archivematicaTransferUuid });
     interventionFromObservation(transferObservation);

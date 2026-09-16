@@ -8,7 +8,7 @@ import { createArchivematicaService } from '@ici/integration-archivematica';
 import { Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { createArchiveTransferPollController, createMalwareScanPollController, integrationQueueName, processIntegrationJob, runArchiveTransferPreservationOnce, runMalwareScanOnce, type ArchiveTransferWorkerDependencies, type MalwareScanWorkerDependencies } from './jobs.js';
-import { FilesystemPreservationTransferStager, ProductionPreservationExecution } from './preservation.js';
+import { FilesystemPreservationTransferStager, PreservationInterventionRequired, ProductionPreservationExecution } from './preservation.js';
 
 const config = readWorkerConfig();
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -21,14 +21,12 @@ const preservationDependencies: ArchiveTransferWorkerDependencies | undefined = 
       const atom = new AtomClient({ baseUrl: config.atomBaseUrl, apiKey: config.atomApiKey, ...(config.atomCulture === undefined ? {} : { culture: config.atomCulture }), ...(config.atomRequestTimeoutMs === undefined ? {} : { timeoutMs: config.atomRequestTimeoutMs }), draftPolicy: config.atomDraftPolicy });
       const archivematica = createArchivematicaService(config.archivematica, createArchivematicaTransferStore(malwareDependencies.database));
       const stager = new FilesystemPreservationTransferStager(config.archivematica.transferSourceRoot, config.archivematica.transferSourceLocationUuid, malwareDependencies.storage);
-      const preservation = new ProductionPreservationExecution({ database: malwareDependencies.database, cleanStorage: malwareDependencies.storage, atom, archivematica, stager, transferSourceLocationUuid: config.archivematica.transferSourceLocationUuid, verifyArchivalIntegration: async ({ fileSlug }) => {
-        // Archivematica's native AtoM DIP upload is asynchronous.  The
-        // strongest public cross-system evidence available without vendor DB
-        // access is a completed ingest, an unambiguous DIP relation (checked
-        // by the Archivematica adapter), and the target File read response
-        // exposing AtoM's documented digital_object field.
-        const file = await atom.getInformationObject(fileSlug);
-        return file.levelOfDescription?.toLowerCase() === 'file' && file.hasDigitalObject === true;
+      const preservation = new ProductionPreservationExecution({ database: malwareDependencies.database, cleanStorage: malwareDependencies.storage, atom, archivematica, stager, transferSourceLocationUuid: config.archivematica.transferSourceLocationUuid, verifyArchivalIntegration: ({ dipUuid }) => {
+        // Archivematica's native AtoM DIP delivery is asynchronous. The
+        // pinned public APIs do not expose a reliable correlation from this
+        // DIP UUID to the child Item descriptions created below the target
+        // File. Fail closed until that evidence is independently observable.
+        return Promise.reject(new PreservationInterventionRequired(`Archivematica DIP ${dipUuid} was generated, but native AtoM delivery cannot be independently proven through the documented APIs`));
       } });
       return { database: malwareDependencies.database, preservation };
     })()

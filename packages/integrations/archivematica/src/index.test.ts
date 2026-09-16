@@ -13,6 +13,7 @@ import {
 const transferUuid = '11111111-1111-4111-8111-111111111111';
 const sipUuid = '22222222-2222-4222-8222-222222222222';
 const aipUuid = '33333333-3333-4333-8333-333333333333';
+const dipUuid = '66666666-6666-4666-8666-666666666666';
 const pipelineUuid = '44444444-4444-4444-8444-444444444444';
 const locationUuid = '55555555-5555-4555-8555-555555555555';
 const config: ArchivematicaConfig = { baseUrl: 'https://dashboard.example///', username: 'ici', apiKey: 'secret', storageBaseUrl: 'https://storage.example', storageUsername: 'ici-ss', storageApiKey: 'storage-secret', pipelineUuid, transferSourceLocationUuid: locationUuid, processingConfiguration: 'automated', requestTimeoutMs: 100, storageRequestTimeoutMs: 100 };
@@ -63,13 +64,45 @@ describe('Archivematica 1.18 / Storage Service 0.24 adapter', () => {
 
   it('requires authoritative AIP Storage Service evidence', async () => {
     const store = createInMemoryArchivematicaStore();
-    const fetch = validFetch((url) => url.includes(`/api/v2/file/${aipUuid}/`)
-      ? response(200, { uuid: aipUuid, package_type: 'AIP', status: 'UPLOADED' })
+    const fetch = validFetch((url) => url.includes(`/api/v2/file/${sipUuid}/`)
+      ? response(200, { uuid: sipUuid, package_type: 'AIP', status: 'UPLOADED' })
       : undefined);
     const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
     await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
-    await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid })).resolves.toMatchObject({ state: 'aip_stored', aipUuid });
-    await expect(service.discoverDip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid })).rejects.toMatchObject({ code: 'DIP_NOT_PROVABLE' });
+    await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'aip_stored', aipUuid: sipUuid });
+    await expect(service.discoverDip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).rejects.toMatchObject({ code: 'DIP_NOT_PROVABLE' });
+  });
+
+  it('accepts VERIFIED AIP state and resolves DIP resource URI relations', async () => {
+    const store = createInMemoryArchivematicaStore();
+    const fetch = validFetch((url) => url.includes(`/api/v2/file/${sipUuid}/`)
+      ? response(200, { uuid: sipUuid, package_type: 'AIP', status: 'VERIFIED', related_packages: [`/api/v2/file/${dipUuid}/`] })
+      : url.includes(`/api/v2/file/${dipUuid}/`)
+        ? response(200, { uuid: dipUuid, package_type: 'DIP', status: 'UPLOADED' })
+        : undefined);
+    const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
+    await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'aip_stored' });
+    await expect(service.discoverDip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid: sipUuid })).resolves.toMatchObject({ state: 'dip_uploaded', dipUuid });
+  });
+
+  it('rejects an AIP identity that differs from the authoritative SIP', async () => {
+    const store = createInMemoryArchivematicaStore();
+    const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch: validFetch() }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch: validFetch() }), store);
+    await store.reserve({ institutionId: 'institution-a', archiveTransferId: 'archive-1', processingConfiguration: 'automated', transferSourceLocationUuid: locationUuid, transferSourceRelativePath: 'transfer' });
+    await expect(service.verifyAip({ institutionId: 'institution-a', archiveTransferId: 'archive-1', transferUuid, sipUuid, aipUuid })).rejects.toMatchObject({ code: 'ARCHIVEMATICA_AIP_SIP_MISMATCH', kind: 'CONFLICT' });
+  });
+
+  it('does not resubmit after remote success when local persistence fails', async () => {
+    let posts = 0;
+    const fetch = validFetch((url) => { if (url.includes('/api/v2beta/package')) { posts += 1; return response(202, { id: transferUuid }); } return undefined; });
+    const base = createInMemoryArchivematicaStore();
+    let failPersistence = true;
+    const store = { ...base, saveSubmission: async (input: Parameters<typeof base.saveSubmission>[0]) => { if (failPersistence) { failPersistence = false; throw new Error('database unavailable'); } return base.saveSubmission(input); } };
+    const service = new ArchivematicaPreservationService(config, new ArchivematicaDashboardClient({ baseUrl: config.baseUrl, username: config.username, apiKey: config.apiKey, fetch }), new ArchivematicaStorageServiceClient({ baseUrl: config.storageBaseUrl, username: config.storageUsername, apiKey: config.storageApiKey, fetch }), store);
+    await expect(service.submit({ institutionId: 'institution-a', archiveTransferId: 'archive-1', source: { locationUuid, relativePath: 'transfer' } })).rejects.toThrow('database unavailable');
+    await expect(service.submit({ institutionId: 'institution-a', archiveTransferId: 'archive-1', source: { locationUuid, relativePath: 'transfer' } })).rejects.toMatchObject({ code: 'ARCHIVEMATICA_RECONCILIATION_REQUIRED' });
+    expect(posts).toBe(1);
   });
 
   it('maps authentication and malformed responses without exposing credentials', async () => {

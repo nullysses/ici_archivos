@@ -37,6 +37,8 @@ describe('Archivematica durable references', () => {
     const observed = await store.find({ institutionId, archiveTransferId: transferId });
     expect(saved.submissionStatus).toBe('SUBMITTED');
     expect(observed).toMatchObject({ archivematicaTransferUuid: '99000000-0000-4000-8000-000000000001', sipUuid: '99000000-0000-4000-8000-000000000002', aipUuid: '99000000-0000-4000-8000-000000000003' });
+    await expect(store.saveObservation({ institutionId, archiveTransferId: transferId, sipUuid: '99000000-0000-4000-8000-000000000099' })).rejects.toMatchObject({ code: 'ARCHIVEMATICA_IDENTITY_CONFLICT' });
+    await expect(store.find({ institutionId, archiveTransferId: transferId })).resolves.toMatchObject({ sipUuid: '99000000-0000-4000-8000-000000000002' });
     await expect(store.find({ institutionId: '88000000-0000-4000-0000-000000000099', archiveTransferId: transferId })).resolves.toBeUndefined();
   });
 });

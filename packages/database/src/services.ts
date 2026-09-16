@@ -1536,6 +1536,16 @@ export async function saveArchivematicaObservation(database: Database, input: {
     const now = await databaseTimestamp(transaction, 'Archivematica observation');
     const existing = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).forUpdate().executeTakeFirst();
     if (existing === undefined) throw new DomainInvariantError('ARCHIVEMATICA_RESERVATION_REQUIRED', 'Archivematica transfer record was not found');
+    const stableIdentities: readonly [string, string | null, string | undefined][] = [
+      ['SIP', existing.sip_uuid, input.sipUuid],
+      ['AIP', existing.aip_uuid, input.aipUuid],
+      ['DIP', existing.dip_uuid, input.dipUuid],
+    ];
+    for (const [label, persisted, observed] of stableIdentities) {
+      if (observed !== undefined && persisted !== null && persisted !== observed) {
+        throw new DomainInvariantError('ARCHIVEMATICA_IDENTITY_CONFLICT', `${label} identity cannot be replaced once persisted`);
+      }
+    }
     const updates = {
       ...(input.lastRemoteStatus === undefined ? {} : { last_remote_status: input.lastRemoteStatus }),
       ...(input.lastIngestStatus === undefined ? {} : { last_ingest_status: input.lastIngestStatus }),

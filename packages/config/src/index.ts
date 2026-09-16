@@ -38,13 +38,17 @@ export interface WorkerConfig {
   readonly atomApiKey?: string | undefined;
   readonly atomCulture?: string | undefined;
   readonly atomRequestTimeoutMs?: number | undefined;
+  readonly atomDraftPolicy?: 'SERVICE_ACCOUNT_NO_PUBLISH' | undefined;
 }
+
+export type AtomDraftPolicy = 'SERVICE_ACCOUNT_NO_PUBLISH';
 
 export interface AtomConfig {
   readonly baseUrl: string | undefined;
   readonly apiKey: string | undefined;
   readonly culture: string;
   readonly requestTimeoutMs: number;
+  readonly draftPolicy: AtomDraftPolicy;
 }
 
 export function readAtomConfig(environment: NodeJS.ProcessEnv = process.env): AtomConfig {
@@ -52,6 +56,8 @@ export function readAtomConfig(environment: NodeJS.ProcessEnv = process.env): At
   const apiKey = blankToUndefined(environment.ATOM_API_KEY);
   const culture = blankToUndefined(environment.ATOM_CULTURE) ?? 'en';
   const requestTimeoutMs = readOptionalPositive(environment.ATOM_REQUEST_TIMEOUT_MS, 10_000);
+  const draftPolicyValue = blankToUndefined(environment.ATOM_DRAFT_POLICY);
+  const draftPolicy: AtomDraftPolicy = draftPolicyValue === undefined ? 'SERVICE_ACCOUNT_NO_PUBLISH' : draftPolicyValue === 'SERVICE_ACCOUNT_NO_PUBLISH' ? draftPolicyValue : (() => { throw new Error('ATOM_DRAFT_POLICY must be SERVICE_ACCOUNT_NO_PUBLISH'); })();
   if (baseUrl !== undefined) {
     try {
       const parsed = new URL(baseUrl);
@@ -60,7 +66,8 @@ export function readAtomConfig(environment: NodeJS.ProcessEnv = process.env): At
   }
   if (baseUrl === undefined && apiKey !== undefined) throw new Error('ATOM_BASE_URL is required when ATOM_API_KEY is configured');
   if (baseUrl !== undefined && apiKey === undefined) throw new Error('ATOM_API_KEY is required when ATOM_BASE_URL is configured');
-  return { baseUrl, apiKey, culture, requestTimeoutMs };
+  if (baseUrl !== undefined && draftPolicyValue === undefined) throw new Error('ATOM_DRAFT_POLICY is required when AtoM is configured');
+  return { baseUrl, apiKey, culture, requestTimeoutMs, draftPolicy };
 }
 
 export function readApiConfig(environment: NodeJS.ProcessEnv = process.env): ApiConfig {
@@ -129,7 +136,7 @@ export function readWorkerConfig(environment: NodeJS.ProcessEnv = process.env): 
   return {
     redisUrl: environment.REDIS_URL ?? 'redis://127.0.0.1:6379', databaseUrl, clamavHost,
     clamavPort: readOptionalPort(environment.CLAMAV_PORT, 3310), clamavConnectTimeoutMs: readOptionalPositive(environment.CLAMAV_CONNECT_TIMEOUT_MS, 5000), clamavReadTimeoutMs: readOptionalPositive(environment.CLAMAV_READ_TIMEOUT_MS, 30000),
-    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000), malwareLeaseSeconds: readOptionalPositive(environment.MALWARE_LEASE_SECONDS, 300), atomBaseUrl: atom.baseUrl, atomApiKey: atom.apiKey, atomCulture: atom.culture, atomRequestTimeoutMs: atom.requestTimeoutMs,
+    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000), malwareLeaseSeconds: readOptionalPositive(environment.MALWARE_LEASE_SECONDS, 300), atomBaseUrl: atom.baseUrl, atomApiKey: atom.apiKey, atomCulture: atom.culture, atomRequestTimeoutMs: atom.requestTimeoutMs, atomDraftPolicy: atom.draftPolicy,
   };
 }
 

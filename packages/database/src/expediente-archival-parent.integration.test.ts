@@ -12,6 +12,7 @@ import {
   loadApprovedExpedienteAtomSyncContext,
   markAtomMappingFailed,
   persistExpedienteTransition,
+  reserveAtomMapping,
   saveAtomMapping,
   setExpedienteArchivalParentAtomically,
   type Database,
@@ -101,5 +102,15 @@ describe('expediente archival parent precondition', () => {
     await expect(setExpedienteArchivalParentAtomically(db(), { institutionId, expedienteId, archivalParentNodeId: subseriesId, actorUserId: userId, correlationId: 'parent-after-prepare', authorizationContext: authorization })).rejects.toMatchObject({ code: 'ARCHIVAL_PARENT_IMMUTABLE' });
     await expect(db().updateTable('expedientes').set({ archival_parent_node_id: subseriesId }).where('institution_id', '=', institutionId).where('id', '=', expedienteId).execute()).rejects.toThrow(/cannot change after transfer preparation/i);
     expect(await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).where('event_type', 'in', ['expediente.archival_parent_set', 'expediente.archival_parent_changed']).execute()).toHaveLength(3);
+  });
+
+  it('reserves one tenant mapping identity under concurrent synchronization', async () => {
+    const results = await Promise.all([
+      reserveAtomMapping(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: fondsId }),
+      reserveAtomMapping(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: fondsId }),
+    ]);
+    expect(results.filter((result) => result.reserved)).toHaveLength(1);
+    expect(results.map((result) => result.record.syncStatus)).toEqual(['PENDING', 'PENDING']);
+    expect(await findAtomMapping(db(), { institutionId, iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE', iciObjectId: fondsId })).toMatchObject({ syncStatus: 'PENDING', atomInformationObjectId: null, atomSlug: null });
   });
 });

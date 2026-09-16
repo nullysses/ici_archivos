@@ -23,13 +23,15 @@ describe('readApiConfig', () => {
 
 describe('readAtomConfig', () => {
   it('normalizes optional AtoM configuration and keeps it disabled by default', () => {
-    expect(readAtomConfig({})).toEqual({ baseUrl: undefined, apiKey: undefined, culture: 'en', requestTimeoutMs: 10_000 });
-    expect(readAtomConfig({ ATOM_BASE_URL: 'https://atom.example///', ATOM_API_KEY: 'key', ATOM_CULTURE: 'es', ATOM_REQUEST_TIMEOUT_MS: '2500' })).toEqual({ baseUrl: 'https://atom.example///', apiKey: 'key', culture: 'es', requestTimeoutMs: 2500 });
+    expect(readAtomConfig({})).toEqual({ baseUrl: undefined, apiKey: undefined, culture: 'en', requestTimeoutMs: 10_000, draftPolicy: 'SERVICE_ACCOUNT_NO_PUBLISH' });
+    expect(readAtomConfig({ ATOM_BASE_URL: 'https://atom.example///', ATOM_API_KEY: 'key', ATOM_CULTURE: 'es', ATOM_REQUEST_TIMEOUT_MS: '2500', ATOM_DRAFT_POLICY: 'SERVICE_ACCOUNT_NO_PUBLISH' })).toEqual({ baseUrl: 'https://atom.example///', apiKey: 'key', culture: 'es', requestTimeoutMs: 2500, draftPolicy: 'SERVICE_ACCOUNT_NO_PUBLISH' });
   });
 
   it('requires complete and valid AtoM configuration', () => {
     expect(() => readAtomConfig({ ATOM_API_KEY: 'key' })).toThrow('ATOM_BASE_URL');
     expect(() => readAtomConfig({ ATOM_BASE_URL: 'https://atom.example' })).toThrow('ATOM_API_KEY');
+    expect(() => readAtomConfig({ ATOM_BASE_URL: 'https://atom.example', ATOM_API_KEY: 'key' })).toThrow('ATOM_DRAFT_POLICY');
     expect(() => readAtomConfig({ ATOM_BASE_URL: 'ftp://atom.example', ATOM_API_KEY: 'key' })).toThrow('ATOM_BASE_URL');
+    expect(() => readAtomConfig({ ATOM_DRAFT_POLICY: 'PUBLISH' })).toThrow('ATOM_DRAFT_POLICY');
   });
 });

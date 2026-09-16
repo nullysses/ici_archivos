@@ -1318,6 +1318,18 @@ export async function findAtomMapping(database: Database, input: { readonly inst
   });
 }
 
+/** Reserves the local identity before making a remote POST. A caller that did
+ * not create the row must reconcile the previous attempt instead of posting
+ * again, which closes the remote-create/local-commit crash window. */
+export async function reserveAtomMapping(database: Database, input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }): Promise<{ readonly record: AtomMappingPersistenceRecord; readonly reserved: boolean }> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'AtoM mapping reservation');
+    const inserted = await transaction.insertInto('atom_mappings').values({ institution_id: input.institutionId, ici_object_type: input.iciObjectType, ici_object_id: input.iciObjectId, atom_information_object_id: null, atom_slug: null, sync_status: 'PENDING', last_synced_at: null, created_at: now, updated_at: now }).onConflict((oc) => oc.columns(['institution_id', 'ici_object_type', 'ici_object_id']).doNothing()).executeTakeFirst();
+    const row = await transaction.selectFrom('atom_mappings').selectAll().where('institution_id', '=', input.institutionId).where('ici_object_type', '=', input.iciObjectType).where('ici_object_id', '=', input.iciObjectId).executeTakeFirstOrThrow();
+    return { record: toAtomMappingRecord(row), reserved: inserted.numInsertedOrUpdatedRows === 1n };
+  });
+}
+
 /** Upserts only validated external identity; it never clears an existing identity. */
 export async function saveAtomMapping(database: Database, input: {
   readonly institutionId: InstitutionId | string;
@@ -1357,11 +1369,13 @@ export async function markAtomMappingFailed(database: Database, input: { readonl
  * database transactions and this object keeps all reads tenant-scoped. */
 export function createAtomMappingStore(database: Database): {
   readonly find: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }) => Promise<AtomMappingPersistenceRecord | undefined>;
+  readonly reserve: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }) => Promise<{ readonly record: AtomMappingPersistenceRecord; readonly reserved: boolean }>;
   readonly save: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string; readonly atomInformationObjectId: string; readonly atomSlug: string; readonly syncStatus: 'SYNCED' | 'FAILED' }) => Promise<AtomMappingPersistenceRecord>;
   readonly markFailed: (input: { readonly institutionId: InstitutionId | string; readonly iciObjectType: AtomMappingPersistenceRecord['iciObjectType']; readonly iciObjectId: string }) => Promise<AtomMappingPersistenceRecord>;
 } {
   return {
     find: (input) => findAtomMapping(database, input),
+    reserve: (input) => reserveAtomMapping(database, input),
     save: (input) => saveAtomMapping(database, input),
     markFailed: (input) => markAtomMappingFailed(database, input),
   };
@@ -1383,7 +1397,7 @@ export async function loadApprovedExpedienteAtomSyncContext(database: Database, 
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
     const transfer = await transaction.selectFrom('archive_transfers').select(['id', 'expediente_id', 'status']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirst();
     if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
-    if (transfer.status !== 'APPROVED') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved transfer can be synchronized to AtoM');
+    if (transfer.status !== 'APPROVED' && transfer.status !== 'SUBMITTED' && transfer.status !== 'PRESERVING') throw new DomainInvariantError('INVALID_TRANSITION', 'Only an approved or active transfer can be synchronized to AtoM');
     const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', input.institutionId).where('transfer_id', '=', input.transferId).executeTakeFirst();
     if (manifest === undefined || manifest.status !== 'APPROVED' || manifest.sha256 === null) throw new DomainInvariantError('MANIFEST_NOT_APPROVED', 'An approved manifest is required');
     if (canonicalManifestSha256(manifest.canonical_json) !== manifest.sha256.toLowerCase()) throw new DomainInvariantError('MANIFEST_HASH_MISMATCH', 'The approved manifest hash does not match its canonical JSON');

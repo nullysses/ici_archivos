@@ -25,6 +25,7 @@ export interface AtomMappingRecord {
 
 export interface AtomMappingStore {
   find(input: { readonly institutionId: string; readonly iciObjectType: AtomObjectType; readonly iciObjectId: string }): Promise<AtomMappingRecord | undefined>;
+  reserve(input: { readonly institutionId: string; readonly iciObjectType: AtomObjectType; readonly iciObjectId: string }): Promise<{ readonly record: AtomMappingRecord; readonly reserved: boolean }>;
   save(input: {
     readonly institutionId: string;
     readonly iciObjectType: AtomObjectType;
@@ -53,19 +54,22 @@ export type AtomErrorKind =
   | 'NETWORK'
   | 'REMOTE'
   | 'INVALID_RESPONSE'
-  | 'MAPPING';
+  | 'MAPPING'
+  | 'RECONCILIATION_REQUIRED';
 
 export class AtomAdapterError extends Error {
   public readonly kind: AtomErrorKind;
   public readonly status: number | undefined;
   public readonly retryable: boolean;
+  public readonly code: string;
 
-  public constructor(kind: AtomErrorKind, message: string, options: { readonly status?: number; readonly retryable?: boolean } = {}) {
+  public constructor(kind: AtomErrorKind, message: string, options: { readonly status?: number; readonly retryable?: boolean; readonly code?: string } = {}) {
     super(message);
     this.name = 'AtomAdapterError';
     this.kind = kind;
     this.status = options.status;
     this.retryable = options.retryable ?? (kind === 'TIMEOUT' || kind === 'NETWORK' || kind === 'REMOTE');
+    this.code = options.code ?? kind;
   }
 }
 
@@ -75,6 +79,8 @@ export interface AtomClientConfig {
   readonly culture?: string;
   readonly timeoutMs?: number;
   readonly fetch?: AtomFetch;
+  /** The AtoM service account is configured without publication permission. */
+  readonly draftPolicy: 'SERVICE_ACCOUNT_NO_PUBLISH';
 }
 
 export interface AtomCreateInformationObjectInput {
@@ -84,13 +90,12 @@ export interface AtomCreateInformationObjectInput {
   readonly levelOfDescription: 'File';
 }
 
-export interface AtomInformationObjectDetails extends AtomInformationObjectReference {
-  readonly id: string;
-  readonly slug: string;
-  readonly parentId?: string | undefined;
-  readonly parentSlug?: string | undefined;
+export interface AtomInformationObjectDetails {
   readonly identifier?: string | undefined;
   readonly levelOfDescription?: string | undefined;
+  readonly referenceCode?: string | undefined;
+  readonly title?: string | undefined;
+  readonly publicationStatus?: string | undefined;
 }
 
 export interface AtomBrowseInformationObject {
@@ -125,18 +130,26 @@ function requiredString(value: unknown, field: string): string {
   return value;
 }
 
-function parseReference(value: unknown): AtomInformationObjectDetails {
+function parseReadDetails(value: unknown): AtomInformationObjectDetails {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new AtomAdapterError('INVALID_RESPONSE', 'AtoM response must be an object', { retryable: false });
   const object = value as Record<string, unknown>;
-  const parentId = object.parent_id;
-  const parentSlug = object.parent_slug;
+  return {
+    ...(typeof object.identifier === 'string' ? { identifier: object.identifier } : {}),
+    ...(typeof object.level_of_description === 'string' ? { levelOfDescription: object.level_of_description } : {}),
+    ...(typeof object.reference_code === 'string' ? { referenceCode: object.reference_code } : {}),
+    ...(typeof object.title === 'string' ? { title: object.title } : {}),
+    ...(typeof object.publication_status === 'string' ? { publicationStatus: object.publication_status } : {}),
+  };
+}
+
+function parseCreatedReference(value: unknown): AtomInformationObjectReference & { readonly publicationStatus?: string; readonly published?: boolean } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new AtomAdapterError('INVALID_RESPONSE', 'AtoM response must be an object', { retryable: false });
+  const object = value as Record<string, unknown>;
   return {
     id: normalizeDecimalId(object.id),
     slug: requiredString(object.slug, 'slug'),
-    ...(parentId === undefined || parentId === null ? {} : { parentId: normalizeDecimalId(parentId) }),
-    ...(parentSlug === undefined || parentSlug === null ? {} : { parentSlug: requiredString(parentSlug, 'parent_slug') }),
-    ...(typeof object.identifier === 'string' ? { identifier: object.identifier } : {}),
-    ...(typeof object.level_of_description === 'string' ? { levelOfDescription: object.level_of_description } : {}),
+    ...(typeof object.publication_status === 'string' ? { publicationStatus: object.publication_status } : {}),
+    ...(typeof object.published === 'boolean' ? { published: object.published } : {}),
   };
 }
 
@@ -167,10 +180,11 @@ export class AtomClient {
     this.culture = config.culture?.trim() || undefined;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = config.fetch ?? fetch;
+    if (config.draftPolicy !== 'SERVICE_ACCOUNT_NO_PUBLISH') throw new AtomAdapterError('MAPPING', 'AtoM draft policy must be SERVICE_ACCOUNT_NO_PUBLISH', { retryable: false });
   }
 
   public async getInformationObject(slug: string): Promise<AtomInformationObjectDetails> {
-    return parseReference(await this.request('GET', `api/informationobjects/${encodeURIComponent(slug)}`));
+    return parseReadDetails(await this.request('GET', `api/informationobjects/${encodeURIComponent(slug)}`));
   }
 
   public async browseInformationObjectsByIdentifier(identifier: string): Promise<readonly AtomBrowseInformationObject[]> {
@@ -184,13 +198,16 @@ export class AtomClient {
 
   public async createInformationObject(input: AtomCreateInformationObjectInput): Promise<AtomInformationObjectReference> {
     const parentIdNumber = Number(input.parent.id);
-    const result = parseReference(await this.request('POST', 'api/informationobjects', {
+    const result = parseCreatedReference(await this.request('POST', 'api/informationobjects', {
       identifier: input.identifier,
       title: input.title,
       level_of_description: input.levelOfDescription,
       parent_id: Number.isSafeInteger(parentIdNumber) ? parentIdNumber : input.parent.id,
       parent_slug: input.parent.slug,
     }));
+    if (result.published === true || result.publicationStatus?.toLowerCase() === 'published') {
+      throw new AtomAdapterError('CONFLICT', 'AtoM created a published description despite the draft-only deployment policy', { retryable: false });
+    }
     return { id: result.id, slug: result.slug };
   }
 
@@ -249,23 +266,8 @@ export interface ApprovedExpedienteAtomSyncContextLoader {
   load(input: { readonly institutionId: string; readonly transferId: string }): Promise<ApprovedExpedienteAtomSyncContext>;
 }
 
-function assertCompatible(reference: AtomInformationObjectDetails, input: ExpedienteFileSyncInput, parent: AtomInformationObjectReference): void {
-  if (reference.identifier !== input.expedienteFolio) throw new AtomAdapterError('CONFLICT', 'AtoM description identifier does not match the expediente folio', { retryable: false });
-  if (reference.levelOfDescription?.toLowerCase() !== 'file') throw new AtomAdapterError('CONFLICT', 'AtoM description is not a File', { retryable: false });
-  if (reference.parentId !== parent.id) throw new AtomAdapterError('CONFLICT', 'AtoM description has the wrong archival parent', { retryable: false });
-  if (reference.parentSlug !== undefined && reference.parentSlug !== parent.slug) throw new AtomAdapterError('CONFLICT', 'AtoM description has the wrong archival parent slug', { retryable: false });
-}
-
-async function resolveRemoteFile(client: AtomClient, input: ExpedienteFileSyncInput, parent: AtomInformationObjectReference): Promise<AtomInformationObjectReference | undefined> {
-  const candidates = await client.browseInformationObjectsByIdentifier(input.expedienteFolio);
-  const compatible: AtomInformationObjectReference[] = [];
-  for (const candidate of candidates) {
-    const full = await client.getInformationObject(candidate.slug);
-    assertCompatible(full, input, parent);
-    compatible.push({ id: full.id, slug: full.slug });
-  }
-  if (compatible.length > 1) throw new AtomAdapterError('CONFLICT', 'AtoM returned multiple matching descriptions', { retryable: false });
-  return compatible[0];
+function assertCompatible(reference: AtomInformationObjectDetails): void {
+  if (reference.levelOfDescription === undefined || reference.levelOfDescription.toLowerCase() !== 'file') throw new AtomAdapterError('CONFLICT', 'AtoM description is not a File', { retryable: false });
 }
 
 async function markFailed(store: AtomMappingStore, input: ExpedienteFileSyncInput): Promise<void> {
@@ -279,34 +281,40 @@ export async function ensureExpedienteFileDescription(client: AtomClient, store:
   if (parentMapping?.syncStatus !== 'SYNCED' || parentMapping.atomInformationObjectId === null || parentMapping.atomSlug === null) throw new AtomAdapterError('MAPPING', 'The authoritative archival parent has no valid AtoM mapping', { retryable: false });
   const parent: AtomInformationObjectReference = { id: parentMapping.atomInformationObjectId, slug: parentMapping.atomSlug };
   const remoteParent = await client.getInformationObject(parent.slug);
-  if (remoteParent.id !== parent.id) throw new AtomAdapterError('CONFLICT', 'The mapped AtoM archival parent identity does not match', { retryable: false });
+  assertCompatibleParent(remoteParent);
   const existing = await store.find({ institutionId: input.institutionId, iciObjectType: ATOM_OBJECT_TYPES.expediente, iciObjectId: input.expedienteId });
   if (existing?.syncStatus === 'SYNCED' && existing.atomInformationObjectId !== null && existing.atomSlug !== null) {
     try {
       const remote = await client.getInformationObject(existing.atomSlug);
-      assertCompatible(remote, input, parent);
-      const mapping = await store.save({ institutionId: input.institutionId, iciObjectType: ATOM_OBJECT_TYPES.expediente, iciObjectId: input.expedienteId, atomInformationObjectId: remote.id, atomSlug: remote.slug, syncStatus: 'SYNCED' });
+      assertCompatible(remote);
+      const mapping = await store.save({ institutionId: input.institutionId, iciObjectType: ATOM_OBJECT_TYPES.expediente, iciObjectId: input.expedienteId, atomInformationObjectId: existing.atomInformationObjectId, atomSlug: existing.atomSlug, syncStatus: 'SYNCED' });
       return { mapping, created: false };
     } catch (error) {
       await markFailed(store, input);
       throw error;
     }
   }
-  let remote: AtomInformationObjectReference | undefined;
-  try { remote = await resolveRemoteFile(client, input, parent); } catch (error) { await markFailed(store, input); throw error; }
-  let created = false;
-  if (remote === undefined) {
-    try {
-      remote = await client.createInformationObject({ identifier: input.expedienteFolio, title: input.title?.trim() || input.expedienteFolio, parent, levelOfDescription: 'File' });
-      created = true;
-    } catch (error) {
-      if (!(error instanceof AtomAdapterError) || error.kind !== 'CONFLICT') { await markFailed(store, input); throw error; }
-      try { remote = await resolveRemoteFile(client, input, parent); } catch (resolveError) { await markFailed(store, input); throw resolveError; }
-      if (remote === undefined) { await markFailed(store, input); throw new AtomAdapterError('CONFLICT', 'AtoM creation conflicted but the description could not be resolved', { retryable: true }); }
-    }
+  const reservation = await store.reserve({ institutionId: input.institutionId, iciObjectType: ATOM_OBJECT_TYPES.expediente, iciObjectId: input.expedienteId });
+  if (!reservation.reserved) throw new AtomAdapterError('RECONCILIATION_REQUIRED', 'AtoM synchronization has an incomplete local reservation; reconcile the remote description before retrying', { retryable: false, code: 'ATOM_RECONCILIATION_REQUIRED' });
+  let remote: AtomInformationObjectReference;
+  try {
+    remote = await client.createInformationObject({ identifier: input.expedienteFolio, title: input.title?.trim() || input.expedienteFolio, parent, levelOfDescription: 'File' });
+  } catch (error) {
+    await markFailed(store, input);
+    if (error instanceof AtomAdapterError && error.kind === 'CONFLICT') throw new AtomAdapterError('RECONCILIATION_REQUIRED', 'AtoM creation conflicted; reconcile the remote description before retrying', { retryable: false, code: 'ATOM_RECONCILIATION_REQUIRED' });
+    throw error;
   }
+  const created = true;
   const mapping = await store.save({ institutionId: input.institutionId, iciObjectType: ATOM_OBJECT_TYPES.expediente, iciObjectId: input.expedienteId, atomInformationObjectId: remote.id, atomSlug: remote.slug, syncStatus: 'SYNCED' });
   return { mapping, created };
+}
+
+function assertCompatibleParent(reference: AtomInformationObjectDetails): void {
+  // The documented read endpoint does not guarantee id/parent fields. The
+  // local mapping remains authoritative for identity; validate the documented
+  // level so a mapped object cannot silently point at a non-parent description.
+  const level = reference.levelOfDescription?.toLowerCase();
+  if (level !== 'series' && level !== 'subseries') throw new AtomAdapterError('CONFLICT', 'The mapped AtoM archival parent is not a Series or Subseries', { retryable: false });
 }
 
 /** Loads the approved transfer snapshot before any network I/O, then performs

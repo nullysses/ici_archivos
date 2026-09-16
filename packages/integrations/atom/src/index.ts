@@ -106,6 +106,10 @@ export interface AtomInformationObjectDetails {
   readonly referenceCode?: string | undefined;
   readonly title?: string | undefined;
   readonly publicationStatus?: string | undefined;
+  /** AtoM's documented read response includes this object after a digital
+   * object has been linked to the description (for example by native DIP
+   * upload). */
+  readonly hasDigitalObject?: boolean | undefined;
 }
 
 export interface AtomBrowseInformationObject {
@@ -143,12 +147,14 @@ function requiredString(value: unknown, field: string): string {
 function parseReadDetails(value: unknown): AtomInformationObjectDetails {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new AtomAdapterError('INVALID_RESPONSE', 'AtoM response must be an object', { retryable: false });
   const object = value as Record<string, unknown>;
+  const digitalObject = object.digital_object;
   return {
     ...(typeof object.identifier === 'string' ? { identifier: object.identifier } : {}),
     ...(typeof object.level_of_description === 'string' ? { levelOfDescription: object.level_of_description } : {}),
     ...(typeof object.reference_code === 'string' ? { referenceCode: object.reference_code } : {}),
     ...(typeof object.title === 'string' ? { title: object.title } : {}),
     ...(typeof object.publication_status === 'string' ? { publicationStatus: object.publication_status } : {}),
+    ...(digitalObject !== undefined ? { hasDigitalObject: digitalObject !== null && typeof digitalObject === 'object' && !Array.isArray(digitalObject) } : {}),
   };
 }
 

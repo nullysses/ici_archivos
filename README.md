@@ -9,7 +9,8 @@ description/access, and Archivematica digital preservation.
 
 ## Status
 
-**Milestone 9 — AtoM adapter and archival hierarchy: complete and frozen.**
+**Milestone 11 — production preservation orchestration: implemented; external
+deployment verification remains operational work.**
 
 The implemented path covers matter registration, assignment and workflow;
 expediente creation, linkage and closure; expediente-owned and matter-owned
@@ -17,8 +18,16 @@ documents; quarantine, durable malware scanning, CLEAN promotion and protected
 download; and immutable transfer manifests through approval. Approval persists
 the durable preservation intent; AtoM archival descriptions and classification
 hierarchy synchronization are implemented with draft-only, tenant-scoped
-mappings. Archivematica remains the next external adapter boundary. The local
-development stack includes PostgreSQL, MinIO
+mappings. The production worker now composes the frozen AtoM and Archivematica
+adapters: it validates the approved manifest, builds a deterministic package
+from CLEAN document versions, stages it in the configured Archivematica Transfer
+Source, resumes durable transfer/ingest observations, verifies AIP storage, and
+requires an AtoM File with a linked digital object before returning preservation
+success. Archivematica `USER_INPUT`, ambiguous staging/submission, and unprovable
+DIP delivery remain explicit intervention/reconciliation outcomes; the worker
+does not guess or retry those operations blindly. Configure
+`ARCHIVEMATICA_TRANSFER_SOURCE_ROOT` only when the worker and Transfer Source
+share a supported filesystem boundary. The local development stack includes PostgreSQL, MinIO
 and private-network ClamAV with the worker and migration jobs running in Docker
 Compose.
 
@@ -26,8 +35,9 @@ The audit findings tranche AH-1 through AH-6 is complete and frozen. The
 authoritative reconciliation is recorded in
 [`docs/audit/AH-6-final-audit.md`](docs/audit/AH-6-final-audit.md).
 
-Next: continue the main roadmap with the separately scoped Archivematica adapter
-and deployment hardening.
+Milestones 1–10 and audit findings AH-1 through AH-6 remain frozen. The next
+roadmap work is deployment/vendor acceptance and the separately scoped Milestone
+12 end-to-end acceptance automation.
 
 ![ICI Archivos implementation status](status-milestone-9-current.png)
 

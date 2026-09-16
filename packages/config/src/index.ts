@@ -54,6 +54,7 @@ export interface ArchivematicaWorkerConfig {
   readonly pipelineUuid: string;
   readonly transferSourceLocationUuid: string;
   readonly processingConfiguration: string;
+  readonly transferSourceRoot?: string | undefined;
 }
 
 export type AtomDraftPolicy = 'SERVICE_ACCOUNT_NO_PUBLISH';
@@ -70,7 +71,7 @@ export function readArchivematicaConfig(environment: NodeJS.ProcessEnv = process
   const values = {
     baseUrl: blankToUndefined(environment.ARCHIVEMATICA_BASE_URL), username: blankToUndefined(environment.ARCHIVEMATICA_USERNAME), apiKey: blankToUndefined(environment.ARCHIVEMATICA_API_KEY),
     storageBaseUrl: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_BASE_URL), storageUsername: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_USERNAME), storageApiKey: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_API_KEY),
-    pipelineUuid: blankToUndefined(environment.ARCHIVEMATICA_PIPELINE_UUID), transferSourceLocationUuid: blankToUndefined(environment.ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID), processingConfiguration: blankToUndefined(environment.ARCHIVEMATICA_PROCESSING_CONFIGURATION),
+    pipelineUuid: blankToUndefined(environment.ARCHIVEMATICA_PIPELINE_UUID), transferSourceLocationUuid: blankToUndefined(environment.ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID), processingConfiguration: blankToUndefined(environment.ARCHIVEMATICA_PROCESSING_CONFIGURATION), transferSourceRoot: blankToUndefined(environment.ARCHIVEMATICA_TRANSFER_SOURCE_ROOT),
   };
   const enabled = Object.values(values).some((value) => value !== undefined);
   if (!enabled) return undefined;
@@ -82,7 +83,7 @@ export function readArchivematicaConfig(environment: NodeJS.ProcessEnv = process
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (!uuid.test(pipelineUuid)) throw new Error('ARCHIVEMATICA_PIPELINE_UUID must be a valid UUID');
   if (!uuid.test(transferSourceLocationUuid)) throw new Error('ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID must be a valid UUID');
-  return { baseUrl, username, apiKey, requestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_REQUEST_TIMEOUT_MS, 10_000), storageBaseUrl, storageUsername, storageApiKey, storageRequestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_STORAGE_REQUEST_TIMEOUT_MS, 10_000), pipelineUuid, transferSourceLocationUuid, processingConfiguration };
+  return { baseUrl, username, apiKey, requestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_REQUEST_TIMEOUT_MS, 10_000), storageBaseUrl, storageUsername, storageApiKey, storageRequestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_STORAGE_REQUEST_TIMEOUT_MS, 10_000), pipelineUuid, transferSourceLocationUuid, processingConfiguration, ...(values.transferSourceRoot === undefined ? {} : { transferSourceRoot: values.transferSourceRoot }) };
 }
 
 export function readAtomConfig(environment: NodeJS.ProcessEnv = process.env): AtomConfig {

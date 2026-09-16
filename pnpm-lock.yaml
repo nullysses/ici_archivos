@@ -139,6 +139,12 @@ importers:
       '@ici/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@ici/integration-archivematica':
+        specifier: workspace:*
+        version: link:../../packages/integrations/archivematica
+      '@ici/integration-atom':
+        specifier: workspace:*
+        version: link:../../packages/integrations/atom
       '@ici/integration-malware':
         specifier: workspace:*
         version: link:../../packages/integrations/malware

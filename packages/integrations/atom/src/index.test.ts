@@ -59,6 +59,15 @@ describe('AtoM 2.10 adapter', () => {
     expect(atomLevelForClassificationNodeType('SUBSERIES')).toBe('Subseries');
   });
 
+  it('exposes the documented digital-object presence from a read response', async () => {
+    const atom = client(() => Promise.resolve(response(200, {
+      level_of_description: 'File',
+      publication_status: 'Draft',
+      digital_object: { filename: 'package.pdf', mime_type: 'application/pdf' },
+    })));
+    await expect(atom.getInformationObject('file')).resolves.toMatchObject({ levelOfDescription: 'File', hasDigitalObject: true });
+  });
+
   it('ensures a Fonds-to-Subseries path parent-first with no fabricated root parent', async () => {
     const fonds = { id: 'f', institutionId, parentId: null, nodeType: 'FONDS' as const, code: 'F', name: 'Fonds' };
     const section = { id: 's', institutionId, parentId: 'f', nodeType: 'SECTION' as const, code: 'S', name: 'Section' };

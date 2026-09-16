@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, ArchivematicaTransfersTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
+import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, ArchivematicaTransfersTable, DocumentsTable, DocumentVersionsTable, PreservationStagingRecordsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -1574,6 +1574,106 @@ export function createArchivematicaTransferStore(database: Database): {
     markReconciliationRequired: (input) => markArchivematicaReconciliationRequired(database, input),
     saveObservation: (input) => saveArchivematicaObservation(database, input),
   };
+}
+
+export interface PreservationStagingPersistenceRecord {
+  readonly institutionId: string;
+  readonly archiveTransferId: string;
+  readonly locationUuid: string;
+  readonly relativePath: string;
+  readonly manifestSha256: string;
+  readonly status: 'IN_PROGRESS' | 'STAGED' | 'RECONCILIATION_REQUIRED';
+}
+
+function toPreservationStagingRecord(row: Selectable<PreservationStagingRecordsTable>): PreservationStagingPersistenceRecord {
+  return { institutionId: row.institution_id, archiveTransferId: row.archive_transfer_id, locationUuid: row.location_uuid, relativePath: row.relative_path, manifestSha256: row.manifest_sha256, status: row.status };
+}
+
+export async function findPreservationStaging(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }): Promise<PreservationStagingPersistenceRecord | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('preservation_staging_records').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirst();
+    return row === undefined ? undefined : toPreservationStagingRecord(row);
+  });
+}
+
+export async function reservePreservationStaging(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string; readonly locationUuid: string; readonly relativePath: string; readonly manifestSha256: string }): Promise<{ readonly record: PreservationStagingPersistenceRecord; readonly reserved: boolean }> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Preservation staging reservation');
+    const inserted = await transaction.insertInto('preservation_staging_records').values({ institution_id: input.institutionId, archive_transfer_id: input.archiveTransferId, location_uuid: input.locationUuid, relative_path: input.relativePath, manifest_sha256: input.manifestSha256, status: 'IN_PROGRESS', created_at: now, updated_at: now }).onConflict((oc) => oc.columns(['institution_id', 'archive_transfer_id']).doNothing()).executeTakeFirst();
+    const row = await transaction.selectFrom('preservation_staging_records').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return { record: toPreservationStagingRecord(row), reserved: inserted.numInsertedOrUpdatedRows === 1n };
+  });
+}
+
+export async function markPreservationStaged(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string; readonly manifestSha256: string }): Promise<PreservationStagingPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Preservation staging complete');
+    await transaction.updateTable('preservation_staging_records').set({ status: 'STAGED', manifest_sha256: input.manifestSha256, updated_at: now }).where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).where('status', '=', 'IN_PROGRESS').where('manifest_sha256', '=', input.manifestSha256).executeTakeFirstOrThrow();
+    return toPreservationStagingRecord(await transaction.selectFrom('preservation_staging_records').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow());
+  });
+}
+
+export async function markPreservationStagingReconciliationRequired(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }): Promise<PreservationStagingPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Preservation staging reconciliation');
+    await transaction.updateTable('preservation_staging_records').set({ status: 'RECONCILIATION_REQUIRED', updated_at: now }).where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return toPreservationStagingRecord(await transaction.selectFrom('preservation_staging_records').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow());
+  });
+}
+
+export function createPreservationStagingStore(database: Database): {
+  readonly find: (input: { readonly institutionId: string; readonly archiveTransferId: string }) => Promise<PreservationStagingPersistenceRecord | undefined>;
+  readonly reserve: (input: { readonly institutionId: string; readonly archiveTransferId: string; readonly locationUuid: string; readonly relativePath: string; readonly manifestSha256: string }) => Promise<{ readonly record: PreservationStagingPersistenceRecord; readonly reserved: boolean }>;
+  readonly markStaged: (input: { readonly institutionId: string; readonly archiveTransferId: string; readonly manifestSha256: string }) => Promise<PreservationStagingPersistenceRecord>;
+  readonly markReconciliationRequired: (input: { readonly institutionId: string; readonly archiveTransferId: string }) => Promise<PreservationStagingPersistenceRecord>;
+} {
+  return { find: (input) => findPreservationStaging(database, input), reserve: (input) => reservePreservationStaging(database, input), markStaged: (input) => markPreservationStaged(database, input), markReconciliationRequired: (input) => markPreservationStagingReconciliationRequired(database, input) };
+}
+
+export interface PreservationPackageVersionRecord {
+  readonly versionId: string;
+  readonly versionNumber: number;
+  readonly storageKey: string;
+  readonly filename: string;
+  readonly sha256: string;
+  readonly sizeBytes: string;
+  readonly mimeType: string;
+}
+
+export interface ApprovedPreservationPackageContext {
+  readonly institutionId: string;
+  readonly transferId: string;
+  readonly expedienteId: string;
+  readonly manifestId: string;
+  readonly manifestSha256: string;
+  readonly canonicalManifestJson: string;
+  readonly versions: readonly PreservationPackageVersionRecord[];
+}
+
+export async function loadApprovedPreservationPackageContext(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string }): Promise<ApprovedPreservationPackageContext> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const transfer = await transaction.selectFrom('archive_transfers').select(['id', 'expediente_id', 'status']).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).executeTakeFirst();
+    if (transfer === undefined) throw new DomainInvariantError('TRANSFER_NOT_FOUND', 'Archive transfer not found');
+    if (transfer.status !== 'PRESERVING') throw new DomainInvariantError('INVALID_TRANSITION', 'Only a preserving transfer can build a preservation package');
+    const manifest = await loadApprovedArchiveManifest(transaction, input.institutionId, input.transferId);
+    let parsed: unknown;
+    try { parsed = JSON.parse(manifest.canonical_json) as unknown; } catch { throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest JSON is invalid'); }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray((parsed as Record<string, unknown>).documents)) throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest documents are invalid');
+    const entries = (parsed as Record<string, unknown>).documents as unknown[];
+    const ids = entries.map((entry) => (entry !== null && typeof entry === 'object' && typeof (entry as Record<string, unknown>).versionId === 'string' ? (entry as Record<string, unknown>).versionId as string : undefined));
+    if (ids.some((id) => id === undefined) || new Set(ids).size !== ids.length) throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest version identities are invalid');
+    const versions = entries.length === 0 ? [] : await transaction.selectFrom('document_versions').select(['id', 'version_number', 'storage_key', 'original_filename', 'sha256', 'size_bytes', 'detected_mime_type', 'malware_scan_status']).where('institution_id', '=', input.institutionId).where('id', 'in', ids as string[]).execute();
+    if (versions.length !== ids.length) throw new DomainInvariantError('DOCUMENT_VERSION_NOT_FOUND', 'An approved manifest document version is missing');
+    const byId = new Map(versions.map((version) => [version.id, version]));
+    for (const entry of entries) {
+      const value = entry as Record<string, unknown>;
+      const version = byId.get(value.versionId as string);
+      if (version === undefined || value.versionNumber !== version.version_number || value.filename !== version.original_filename || value.sha256 !== version.sha256 || String(value.sizeBytes) !== String(version.size_bytes) || value.mimeType !== version.detected_mime_type) throw new DomainInvariantError('MANIFEST_INVALID', 'Approved manifest metadata diverges from the authoritative document version');
+    }
+    const ordered = ids.map((id) => byId.get(id!));
+    if (ordered.some((version) => version === undefined || version.malware_scan_status !== 'CLEAN')) throw new DomainInvariantError('DOCUMENTS_NOT_CLEAN', 'All approved preservation versions must be CLEAN');
+    return { institutionId: String(input.institutionId), transferId: transfer.id, expedienteId: transfer.expediente_id, manifestId: manifest.id, manifestSha256: manifest.sha256!, canonicalManifestJson: manifest.canonical_json, versions: ordered.map((version) => ({ versionId: version!.id, versionNumber: version!.version_number, storageKey: version!.storage_key, filename: version!.original_filename, sha256: version!.sha256, sizeBytes: String(version!.size_bytes), mimeType: version!.detected_mime_type })) };
+  });
 }
 
 export function createArchivalClassificationPathLoader(database: Database): {

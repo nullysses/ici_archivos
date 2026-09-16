@@ -185,6 +185,11 @@ export async function processClaimedArchiveTransferPreservationJob(
       archivalIntegrationCompleted: result.archivalIntegrationCompleted,
     });
   } catch (error) {
+    if (error !== null && typeof error === 'object' && 'code' in error && ((error as { readonly code?: unknown }).code === 'PRESERVATION_INTERVENTION_REQUIRED' || (error as { readonly code?: unknown }).code === 'PRESERVATION_EXECUTION_DEFERRED')) {
+      // Human intervention is not a preservation failure. Leave the fenced
+      // RUNNING intent for lease reclamation after the intervention is resolved.
+      return;
+    }
     // A stale/reclaimed token or a transfer cancelled by another actor is
     // already fenced by PostgreSQL. In that case fail is expected to reject;
     // the current owner (or terminal command) remains authoritative.

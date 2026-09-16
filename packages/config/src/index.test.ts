@@ -48,6 +48,11 @@ describe('readArchivematicaConfig', () => {
     expect(readArchivematicaConfig(valid)).toMatchObject({ baseUrl: valid.ARCHIVEMATICA_BASE_URL, processingConfiguration: 'automated', requestTimeoutMs: 10_000 });
   });
 
+  it('parses the explicit Transfer Source filesystem boundary without enabling it implicitly', () => {
+    expect(readArchivematicaConfig({ ...valid, ARCHIVEMATICA_TRANSFER_SOURCE_ROOT: '/srv/archivematica-transfer' })).toMatchObject({ transferSourceRoot: '/srv/archivematica-transfer' });
+    expect(readArchivematicaConfig(valid)).not.toHaveProperty('transferSourceRoot');
+  });
+
   it('fails closed for incomplete credentials, invalid UUIDs, and invalid production URLs', () => {
     expect(() => readArchivematicaConfig({ ARCHIVEMATICA_BASE_URL: 'https://archivematica.example' })).toThrow('ARCHIVEMATICA_USERNAME');
     expect(() => readArchivematicaConfig({ ...valid, ARCHIVEMATICA_PIPELINE_UUID: 'bad' })).toThrow('PIPELINE_UUID');

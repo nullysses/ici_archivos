@@ -358,6 +358,18 @@ export interface ArchivematicaTransfersTable {
   updated_at: Timestamp;
 }
 
+export interface PreservationStagingRecordsTable {
+  id: Generated<string>;
+  institution_id: string;
+  archive_transfer_id: string;
+  location_uuid: string;
+  relative_path: string;
+  manifest_sha256: string;
+  status: 'IN_PROGRESS' | 'STAGED' | 'RECONCILIATION_REQUIRED';
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface IciSchemaMigrationsTable {
   id: string;
   applied_at: Timestamp;
@@ -394,4 +406,5 @@ export interface DatabaseSchema {
   audit_events: AuditEventsTable;
   integration_jobs: IntegrationJobsTable;
   archivematica_transfers: ArchivematicaTransfersTable;
+  preservation_staging_records: PreservationStagingRecordsTable;
 }

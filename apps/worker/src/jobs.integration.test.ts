@@ -7,6 +7,7 @@ import type { DocumentStoragePort } from '@ici/integration-storage';
 import type { MalwareScannerPort } from '@ici/integration-malware';
 import type { AuthorizationContext, Capability } from '@ici/database';
 import { processClaimedArchiveTransferPreservationJob, runArchiveTransferPreservationOnce, runMalwareScanOnce, type ArchiveTransferWorkerDependencies, type MalwareScanWorkerDependencies, type PreservationExecutionInput } from './jobs.js';
+import { PreservationExecutionDeferred } from './preservation.js';
 
 const institutionId = '33000000-0000-4000-8000-000000000001';
 const userId = '33000000-0000-4000-8000-000000000002';
@@ -450,5 +451,14 @@ describe('durable malware worker', () => {
     expect((await db().selectFrom('expedientes').select('status').where('id', '=', fixture.expedienteId).executeTakeFirstOrThrow()).status).toBe('TRANSFERRED');
     expect((await db().selectFrom('integration_jobs').select(['status', 'claim_token', 'attempt_count']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'SUCCEEDED', claim_token: null, attempt_count: 2 });
     expect((await db().selectFrom('audit_events').select('event_type').where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', fixture.transferId).where('event_type', '=', 'archive_transfer.preserving').execute())).toEqual([{ event_type: 'archive_transfer.preserving' }]);
+  });
+
+  it('defers incomplete remote progress without marking the transfer failed', async () => {
+    const fixture = await createApprovedArchiveTransfer(9);
+    const [claimed] = await claimArchiveTransferPreservationJobs(db(), institutionId, 1);
+    if (claimed === undefined || claimed.claim_token === null) throw new Error('preservation claim was not acquired');
+    await processClaimedArchiveTransferPreservationJob({ database: db(), preservation: { execute: () => Promise.reject(new PreservationExecutionDeferred('SIP is not available yet')) } }, claimed);
+    expect((await db().selectFrom('archive_transfers').select('status').where('id', '=', fixture.transferId).executeTakeFirstOrThrow()).status).toBe('PRESERVING');
+    expect((await db().selectFrom('integration_jobs').select(['status', 'claim_token']).where('id', '=', fixture.jobId).executeTakeFirstOrThrow())).toMatchObject({ status: 'RUNNING', claim_token: claimed.claim_token });
   });
 });

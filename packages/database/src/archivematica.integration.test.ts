@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { sql } from 'kysely';
 import { applyFoundationMigrations, createArchivematicaTransferStore, createDatabase, type Database } from './index.js';
 
 const institutionId = '88000000-0000-4000-8000-000000000001';
@@ -15,6 +16,7 @@ describe('Archivematica durable references', () => {
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
     database = createDatabase(container.getConnectionUri());
+    await sql`CREATE ROLE ici_app NOLOGIN NOSUPERUSER NOBYPASSRLS`.execute(database);
     await applyFoundationMigrations(database);
     await database.insertInto('institutions').values({ id: institutionId, code: 'ARCH', name: 'Archivematica test', status: 'ACTIVE' }).execute();
     await database.insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'ARCH', name: 'Arch', status: 'ACTIVE' }).execute();

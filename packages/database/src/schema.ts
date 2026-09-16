@@ -339,6 +339,25 @@ export interface IntegrationJobsTable {
   updated_at: Timestamp;
 }
 
+export interface ArchivematicaTransfersTable {
+  id: Generated<string>;
+  institution_id: string;
+  archive_transfer_id: string;
+  submission_status: 'PENDING' | 'SUBMITTED' | 'RECONCILIATION_REQUIRED' | 'FAILED';
+  archivematica_transfer_uuid: Nullable<string>;
+  sip_uuid: Nullable<string>;
+  aip_uuid: Nullable<string>;
+  dip_uuid: Nullable<string>;
+  processing_configuration: string;
+  transfer_source_location_uuid: string;
+  transfer_source_relative_path: string;
+  last_remote_status: Nullable<string>;
+  last_ingest_status: Nullable<string>;
+  last_checked_at: Nullable<Date>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface IciSchemaMigrationsTable {
   id: string;
   applied_at: Timestamp;
@@ -374,4 +393,5 @@ export interface DatabaseSchema {
   archival_corrections: ArchivalCorrectionsTable;
   audit_events: AuditEventsTable;
   integration_jobs: IntegrationJobsTable;
+  archivematica_transfers: ArchivematicaTransfersTable;
 }

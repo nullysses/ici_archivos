@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readApiConfig, readAtomConfig } from './index.js';
+import { readApiConfig, readArchivematicaConfig, readAtomConfig } from './index.js';
 
 describe('readApiConfig', () => {
   it('parses an explicit API port', () => {
@@ -33,5 +33,25 @@ describe('readAtomConfig', () => {
     expect(() => readAtomConfig({ ATOM_BASE_URL: 'https://atom.example', ATOM_API_KEY: 'key' })).toThrow('ATOM_DRAFT_POLICY');
     expect(() => readAtomConfig({ ATOM_BASE_URL: 'ftp://atom.example', ATOM_API_KEY: 'key' })).toThrow('ATOM_BASE_URL');
     expect(() => readAtomConfig({ ATOM_DRAFT_POLICY: 'PUBLISH' })).toThrow('ATOM_DRAFT_POLICY');
+  });
+});
+
+describe('readArchivematicaConfig', () => {
+  const valid = {
+    ARCHIVEMATICA_BASE_URL: 'https://archivematica.example', ARCHIVEMATICA_USERNAME: 'ici', ARCHIVEMATICA_API_KEY: 'secret',
+    ARCHIVEMATICA_STORAGE_BASE_URL: 'https://storage.example', ARCHIVEMATICA_STORAGE_USERNAME: 'ici-ss', ARCHIVEMATICA_STORAGE_API_KEY: 'storage-secret',
+    ARCHIVEMATICA_PIPELINE_UUID: '44444444-4444-4444-8444-444444444444', ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID: '55555555-5555-4555-8555-555555555555', ARCHIVEMATICA_PROCESSING_CONFIGURATION: 'automated',
+  };
+
+  it('keeps Archivematica disabled by default and parses a complete config', () => {
+    expect(readArchivematicaConfig({})).toBeUndefined();
+    expect(readArchivematicaConfig(valid)).toMatchObject({ baseUrl: valid.ARCHIVEMATICA_BASE_URL, processingConfiguration: 'automated', requestTimeoutMs: 10_000 });
+  });
+
+  it('fails closed for incomplete credentials, invalid UUIDs, and invalid production URLs', () => {
+    expect(() => readArchivematicaConfig({ ARCHIVEMATICA_BASE_URL: 'https://archivematica.example' })).toThrow('ARCHIVEMATICA_USERNAME');
+    expect(() => readArchivematicaConfig({ ...valid, ARCHIVEMATICA_PIPELINE_UUID: 'bad' })).toThrow('PIPELINE_UUID');
+    expect(() => readArchivematicaConfig({ ...valid, NODE_ENV: 'production', ARCHIVEMATICA_BASE_URL: 'http://archivematica.example' })).toThrow('HTTPS');
+    expect(() => readArchivematicaConfig({ ...valid, ARCHIVEMATICA_REQUEST_TIMEOUT_MS: '0' })).toThrow('positive integer');
   });
 });

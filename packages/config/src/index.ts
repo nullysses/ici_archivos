@@ -39,6 +39,21 @@ export interface WorkerConfig {
   readonly atomCulture?: string | undefined;
   readonly atomRequestTimeoutMs?: number | undefined;
   readonly atomDraftPolicy?: 'SERVICE_ACCOUNT_NO_PUBLISH' | undefined;
+  readonly archivematica?: ArchivematicaWorkerConfig | undefined;
+}
+
+export interface ArchivematicaWorkerConfig {
+  readonly baseUrl: string;
+  readonly username: string;
+  readonly apiKey: string;
+  readonly requestTimeoutMs: number;
+  readonly storageBaseUrl: string;
+  readonly storageUsername: string;
+  readonly storageApiKey: string;
+  readonly storageRequestTimeoutMs: number;
+  readonly pipelineUuid: string;
+  readonly transferSourceLocationUuid: string;
+  readonly processingConfiguration: string;
 }
 
 export type AtomDraftPolicy = 'SERVICE_ACCOUNT_NO_PUBLISH';
@@ -49,6 +64,25 @@ export interface AtomConfig {
   readonly culture: string;
   readonly requestTimeoutMs: number;
   readonly draftPolicy: AtomDraftPolicy;
+}
+
+export function readArchivematicaConfig(environment: NodeJS.ProcessEnv = process.env): ArchivematicaWorkerConfig | undefined {
+  const values = {
+    baseUrl: blankToUndefined(environment.ARCHIVEMATICA_BASE_URL), username: blankToUndefined(environment.ARCHIVEMATICA_USERNAME), apiKey: blankToUndefined(environment.ARCHIVEMATICA_API_KEY),
+    storageBaseUrl: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_BASE_URL), storageUsername: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_USERNAME), storageApiKey: blankToUndefined(environment.ARCHIVEMATICA_STORAGE_API_KEY),
+    pipelineUuid: blankToUndefined(environment.ARCHIVEMATICA_PIPELINE_UUID), transferSourceLocationUuid: blankToUndefined(environment.ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID), processingConfiguration: blankToUndefined(environment.ARCHIVEMATICA_PROCESSING_CONFIGURATION),
+  };
+  const enabled = Object.values(values).some((value) => value !== undefined);
+  if (!enabled) return undefined;
+  const required = (value: string | undefined, name: string): string => { if (value === undefined) throw new Error(`${name} is required when Archivematica is configured`); return value; };
+  const baseUrl = required(values.baseUrl, 'ARCHIVEMATICA_BASE_URL'); const username = required(values.username, 'ARCHIVEMATICA_USERNAME'); const apiKey = required(values.apiKey, 'ARCHIVEMATICA_API_KEY');
+  const storageBaseUrl = required(values.storageBaseUrl, 'ARCHIVEMATICA_STORAGE_BASE_URL'); const storageUsername = required(values.storageUsername, 'ARCHIVEMATICA_STORAGE_USERNAME'); const storageApiKey = required(values.storageApiKey, 'ARCHIVEMATICA_STORAGE_API_KEY');
+  const pipelineUuid = required(values.pipelineUuid, 'ARCHIVEMATICA_PIPELINE_UUID'); const transferSourceLocationUuid = required(values.transferSourceLocationUuid, 'ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID'); const processingConfiguration = required(values.processingConfiguration, 'ARCHIVEMATICA_PROCESSING_CONFIGURATION');
+  for (const [name, value] of [['ARCHIVEMATICA_BASE_URL', baseUrl], ['ARCHIVEMATICA_STORAGE_BASE_URL', storageBaseUrl]] as const) { try { const parsed = new URL(value); if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error(); if (environment.NODE_ENV === 'production' && parsed.protocol !== 'https:') throw new Error(); } catch { throw new Error(`${name} must be a valid HTTP/HTTPS URL${environment.NODE_ENV === 'production' ? ' using HTTPS in production' : ''}`); } }
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuid.test(pipelineUuid)) throw new Error('ARCHIVEMATICA_PIPELINE_UUID must be a valid UUID');
+  if (!uuid.test(transferSourceLocationUuid)) throw new Error('ARCHIVEMATICA_TRANSFER_SOURCE_LOCATION_UUID must be a valid UUID');
+  return { baseUrl, username, apiKey, requestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_REQUEST_TIMEOUT_MS, 10_000), storageBaseUrl, storageUsername, storageApiKey, storageRequestTimeoutMs: readOptionalPositive(environment.ARCHIVEMATICA_STORAGE_REQUEST_TIMEOUT_MS, 10_000), pipelineUuid, transferSourceLocationUuid, processingConfiguration };
 }
 
 export function readAtomConfig(environment: NodeJS.ProcessEnv = process.env): AtomConfig {
@@ -123,6 +157,7 @@ export function readWorkerConfig(environment: NodeJS.ProcessEnv = process.env): 
   const s3QuarantineBucket = blankToUndefined(environment.S3_QUARANTINE_BUCKET);
   const s3CleanBucket = blankToUndefined(environment.S3_CLEAN_BUCKET);
   const atom = readAtomConfig(environment);
+  const archivematica = readArchivematicaConfig(environment);
   if (production) {
     requireValue(databaseUrl, 'DATABASE_URL');
     requireValue(clamavHost, 'CLAMAV_HOST');
@@ -136,7 +171,7 @@ export function readWorkerConfig(environment: NodeJS.ProcessEnv = process.env): 
   return {
     redisUrl: environment.REDIS_URL ?? 'redis://127.0.0.1:6379', databaseUrl, clamavHost,
     clamavPort: readOptionalPort(environment.CLAMAV_PORT, 3310), clamavConnectTimeoutMs: readOptionalPositive(environment.CLAMAV_CONNECT_TIMEOUT_MS, 5000), clamavReadTimeoutMs: readOptionalPositive(environment.CLAMAV_READ_TIMEOUT_MS, 30000),
-    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000), malwareLeaseSeconds: readOptionalPositive(environment.MALWARE_LEASE_SECONDS, 300), atomBaseUrl: atom.baseUrl, atomApiKey: atom.apiKey, atomCulture: atom.culture, atomRequestTimeoutMs: atom.requestTimeoutMs, atomDraftPolicy: atom.draftPolicy,
+    s3Endpoint, s3Region: blankToUndefined(environment.S3_REGION) ?? 'us-east-1', s3AccessKeyId, s3SecretAccessKey, s3QuarantineBucket, s3CleanBucket, s3ForcePathStyle: environment.S3_FORCE_PATH_STYLE === 'true', malwarePollIntervalMs: readOptionalPositive(environment.MALWARE_POLL_INTERVAL_MS, 1000), malwareLeaseSeconds: readOptionalPositive(environment.MALWARE_LEASE_SECONDS, 300), atomBaseUrl: atom.baseUrl, atomApiKey: atom.apiKey, atomCulture: atom.culture, atomRequestTimeoutMs: atom.requestTimeoutMs, atomDraftPolicy: atom.draftPolicy, archivematica,
   };
 }
 

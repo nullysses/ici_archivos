@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
+import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, ArchivematicaTransfersTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -1425,6 +1425,144 @@ export function createAtomMappingStore(database: Database): {
     reserve: (input) => reserveAtomMapping(database, input),
     save: (input) => saveAtomMapping(database, input),
     markFailed: (input) => markAtomMappingFailed(database, input),
+  };
+}
+
+export interface ArchivematicaTransferPersistenceRecord {
+  readonly institutionId: string;
+  readonly archiveTransferId: string;
+  readonly submissionStatus: 'PENDING' | 'SUBMITTED' | 'RECONCILIATION_REQUIRED' | 'FAILED';
+  readonly archivematicaTransferUuid: string | null;
+  readonly sipUuid: string | null;
+  readonly aipUuid: string | null;
+  readonly dipUuid: string | null;
+  readonly processingConfiguration: string;
+  readonly transferSourceLocationUuid: string;
+  readonly transferSourceRelativePath: string;
+  readonly lastRemoteStatus: string | null;
+  readonly lastIngestStatus: string | null;
+  readonly lastCheckedAt: Date | null;
+}
+
+function toArchivematicaRecord(row: Selectable<ArchivematicaTransfersTable>): ArchivematicaTransferPersistenceRecord {
+  return {
+    institutionId: row.institution_id,
+    archiveTransferId: row.archive_transfer_id,
+    submissionStatus: row.submission_status,
+    archivematicaTransferUuid: row.archivematica_transfer_uuid,
+    sipUuid: row.sip_uuid,
+    aipUuid: row.aip_uuid,
+    dipUuid: row.dip_uuid,
+    processingConfiguration: row.processing_configuration,
+    transferSourceLocationUuid: row.transfer_source_location_uuid,
+    transferSourceRelativePath: row.transfer_source_relative_path,
+    lastRemoteStatus: row.last_remote_status,
+    lastIngestStatus: row.last_ingest_status,
+    lastCheckedAt: row.last_checked_at,
+  };
+}
+
+export async function findArchivematicaTransfer(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }): Promise<ArchivematicaTransferPersistenceRecord | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const row = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirst();
+    return row === undefined ? undefined : toArchivematicaRecord(row);
+  });
+}
+
+export async function reserveArchivematicaTransfer(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly archiveTransferId: string;
+  readonly processingConfiguration: string;
+  readonly transferSourceLocationUuid: string;
+  readonly transferSourceRelativePath: string;
+}): Promise<{ readonly record: ArchivematicaTransferPersistenceRecord; readonly reserved: boolean }> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Archivematica submission reservation');
+    const inserted = await transaction.insertInto('archivematica_transfers').values({
+      institution_id: input.institutionId,
+      archive_transfer_id: input.archiveTransferId,
+      submission_status: 'PENDING',
+      archivematica_transfer_uuid: null,
+      sip_uuid: null,
+      aip_uuid: null,
+      dip_uuid: null,
+      processing_configuration: input.processingConfiguration,
+      transfer_source_location_uuid: input.transferSourceLocationUuid,
+      transfer_source_relative_path: input.transferSourceRelativePath,
+      last_remote_status: null,
+      last_ingest_status: null,
+      last_checked_at: null,
+      created_at: now,
+      updated_at: now,
+    }).onConflict((oc) => oc.columns(['institution_id', 'archive_transfer_id']).doNothing()).executeTakeFirst();
+    const row = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return { record: toArchivematicaRecord(row), reserved: inserted.numInsertedOrUpdatedRows === 1n };
+  });
+}
+
+export async function saveArchivematicaSubmission(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly archiveTransferId: string;
+  readonly archivematicaTransferUuid: string;
+}): Promise<ArchivematicaTransferPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Archivematica submission');
+    const existing = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).forUpdate().executeTakeFirst();
+    if (existing === undefined) throw new DomainInvariantError('ARCHIVEMATICA_RESERVATION_REQUIRED', 'Archivematica submission must be reserved before remote mutation');
+    if (existing.archivematica_transfer_uuid !== null && existing.archivematica_transfer_uuid !== input.archivematicaTransferUuid) throw new DomainInvariantError('ARCHIVEMATICA_MAPPING_CONFLICT', 'A transfer already has a different Archivematica identity');
+    await transaction.updateTable('archivematica_transfers').set({ submission_status: 'SUBMITTED', archivematica_transfer_uuid: input.archivematicaTransferUuid, updated_at: now }).where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return toArchivematicaRecord(await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow());
+  });
+}
+
+export async function markArchivematicaReconciliationRequired(database: Database, input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }): Promise<ArchivematicaTransferPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Archivematica reconciliation');
+    await transaction.updateTable('archivematica_transfers').set({ submission_status: 'RECONCILIATION_REQUIRED', updated_at: now }).where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return toArchivematicaRecord(await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow());
+  });
+}
+
+export async function saveArchivematicaObservation(database: Database, input: {
+  readonly institutionId: InstitutionId | string;
+  readonly archiveTransferId: string;
+  readonly lastRemoteStatus?: string;
+  readonly lastIngestStatus?: string;
+  readonly sipUuid?: string;
+  readonly aipUuid?: string;
+  readonly dipUuid?: string;
+}): Promise<ArchivematicaTransferPersistenceRecord> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const now = await databaseTimestamp(transaction, 'Archivematica observation');
+    const existing = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).forUpdate().executeTakeFirst();
+    if (existing === undefined) throw new DomainInvariantError('ARCHIVEMATICA_RESERVATION_REQUIRED', 'Archivematica transfer record was not found');
+    const updates = {
+      ...(input.lastRemoteStatus === undefined ? {} : { last_remote_status: input.lastRemoteStatus }),
+      ...(input.lastIngestStatus === undefined ? {} : { last_ingest_status: input.lastIngestStatus }),
+      ...(input.sipUuid === undefined ? {} : { sip_uuid: input.sipUuid }),
+      ...(input.aipUuid === undefined ? {} : { aip_uuid: input.aipUuid }),
+      ...(input.dipUuid === undefined ? {} : { dip_uuid: input.dipUuid }),
+      last_checked_at: now,
+      updated_at: now,
+    };
+    await transaction.updateTable('archivematica_transfers').set(updates).where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow();
+    return toArchivematicaRecord(await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', input.institutionId).where('archive_transfer_id', '=', input.archiveTransferId).executeTakeFirstOrThrow());
+  });
+}
+
+export function createArchivematicaTransferStore(database: Database): {
+  readonly find: (input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }) => Promise<ArchivematicaTransferPersistenceRecord | undefined>;
+  readonly reserve: (input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string; readonly processingConfiguration: string; readonly transferSourceLocationUuid: string; readonly transferSourceRelativePath: string }) => Promise<{ readonly record: ArchivematicaTransferPersistenceRecord; readonly reserved: boolean }>;
+  readonly saveSubmission: (input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string; readonly archivematicaTransferUuid: string }) => Promise<ArchivematicaTransferPersistenceRecord>;
+  readonly markReconciliationRequired: (input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string }) => Promise<ArchivematicaTransferPersistenceRecord>;
+  readonly saveObservation: (input: { readonly institutionId: InstitutionId | string; readonly archiveTransferId: string; readonly lastRemoteStatus?: string; readonly lastIngestStatus?: string; readonly sipUuid?: string; readonly aipUuid?: string; readonly dipUuid?: string }) => Promise<ArchivematicaTransferPersistenceRecord>;
+} {
+  return {
+    find: (input) => findArchivematicaTransfer(database, input),
+    reserve: (input) => reserveArchivematicaTransfer(database, input),
+    saveSubmission: (input) => saveArchivematicaSubmission(database, input),
+    markReconciliationRequired: (input) => markArchivematicaReconciliationRequired(database, input),
+    saveObservation: (input) => saveArchivematicaObservation(database, input),
   };
 }
 

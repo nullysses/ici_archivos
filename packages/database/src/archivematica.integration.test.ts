@@ -21,8 +21,8 @@ describe('Archivematica durable references', () => {
     await database.insertInto('institutions').values({ id: institutionId, code: 'ARCH', name: 'Archivematica test', status: 'ACTIVE' }).execute();
     await database.insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'ARCH', name: 'Arch', status: 'ACTIVE' }).execute();
     await database.insertInto('expediente_type_versions').values({ id: versionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object' }, archival_mapping_json: { levelOfDescription: 'File' }, created_at: new Date(), published_at: new Date() }).execute();
-    await database.insertInto('expedientes').values({ id: expedienteId, institution_id: institutionId, folio: 'EXP-2026-000001', folio_year: 2026, sequence_number: 1, status: 'CLOSED', expediente_type_version_id: versionId, metadata: {}, opened_at: new Date() }).execute();
-    await database.insertInto('archive_transfers').values({ id: transferId, institution_id: institutionId, expediente_id: expedienteId, status: 'APPROVED' }).execute();
+    await database.insertInto('expedientes').values({ id: expedienteId, institution_id: institutionId, folio: 'EXP-2026-000001', folio_year: 2026, sequence_number: 1, status: 'OPEN', expediente_type_version_id: versionId, metadata: {}, opened_at: new Date() }).execute();
+    await database.insertInto('archive_transfers').values({ id: transferId, institution_id: institutionId, expediente_id: expedienteId, status: 'DRAFT' }).execute();
   }, 120_000);
   afterAll(async () => { await database?.destroy(); await container?.stop(); });
   function db(): Database { if (database === undefined) throw new Error('Database unavailable'); return database; }

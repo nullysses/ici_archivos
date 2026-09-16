@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { ArchiveTransfersTable, AtomMappingsTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
+import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, DocumentsTable, DocumentVersionsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -1290,6 +1290,53 @@ export const atomObjectTypes = {
   expediente: 'EXPEDIENTE',
 } as const;
 
+export interface ArchivalClassificationPathRecord {
+  readonly id: string;
+  readonly institutionId: string;
+  readonly parentId: string | null;
+  readonly nodeType: ArchivalClassificationNodesTable['node_type'];
+  readonly code: string;
+  readonly name: string;
+}
+
+function expectedArchivalParentType(nodeType: ArchivalClassificationNodesTable['node_type']): ArchivalClassificationNodesTable['node_type'] | null {
+  switch (nodeType) {
+    case 'FONDS': return null;
+    case 'SECTION': return 'FONDS';
+    case 'SERIES': return 'SECTION';
+    case 'SUBSERIES': return 'SERIES';
+  }
+}
+
+/** Loads and validates a tenant-scoped classification path without issuing
+ * any vendor calls. The result is root-first and rejects malformed chains. */
+export async function loadArchivalClassificationPath(database: Database, input: { readonly institutionId: InstitutionId | string; readonly targetNodeId: string }): Promise<readonly ArchivalClassificationPathRecord[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const reverse: ArchivalClassificationPathRecord[] = [];
+    const visited = new Set<string>();
+    let nodeId: string | null = input.targetNodeId;
+    while (nodeId !== null) {
+      if (visited.has(nodeId)) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', 'The archival classification hierarchy contains a cycle');
+      visited.add(nodeId);
+      const row = await transaction.selectFrom('archival_classification_nodes').select(['id', 'institution_id', 'parent_id', 'node_type', 'code', 'name']).where('institution_id', '=', input.institutionId).where('id', '=', nodeId).forShare().executeTakeFirst();
+      if (row === undefined) throw new DomainInvariantError('ARCHIVAL_NODE_NOT_FOUND', 'Archival classification node not found');
+      const expectedParentType = expectedArchivalParentType(row.node_type);
+      if (expectedParentType === null) {
+        if (row.parent_id !== null) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', 'A Fonds node must be a root node');
+      } else if (row.parent_id === null) {
+        throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', `${row.node_type} must have a ${expectedParentType} parent`);
+      }
+      reverse.push({ id: row.id, institutionId: row.institution_id, parentId: row.parent_id, nodeType: row.node_type, code: row.code, name: row.name });
+      nodeId = row.parent_id;
+      if (nodeId !== null) {
+        const parent = await transaction.selectFrom('archival_classification_nodes').select('node_type').where('institution_id', '=', input.institutionId).where('id', '=', nodeId).forShare().executeTakeFirst();
+        if (parent === undefined || parent.node_type !== expectedParentType) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', `${row.node_type} has an invalid parent type`);
+      }
+    }
+    return reverse.reverse();
+  });
+}
+
 export interface AtomMappingPersistenceRecord {
   readonly institutionId: string;
   readonly iciObjectType: 'ARCHIVAL_CLASSIFICATION_NODE' | 'EXPEDIENTE';
@@ -1379,6 +1426,12 @@ export function createAtomMappingStore(database: Database): {
     save: (input) => saveAtomMapping(database, input),
     markFailed: (input) => markAtomMappingFailed(database, input),
   };
+}
+
+export function createArchivalClassificationPathLoader(database: Database): {
+  readonly load: (input: { readonly institutionId: string; readonly targetNodeId: string }) => Promise<readonly ArchivalClassificationPathRecord[]>;
+} {
+  return { load: (input) => loadArchivalClassificationPath(database, input) };
 }
 
 export interface ApprovedExpedienteAtomSyncContext {

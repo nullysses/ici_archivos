@@ -14,6 +14,16 @@ export const ATOM_OBJECT_TYPES = {
   expediente: 'EXPEDIENTE',
 } as const satisfies Record<string, AtomObjectType>;
 
+export type AtomArchivalLevel = 'Fonds' | 'Section' | 'Series' | 'Subseries' | 'File';
+
+export const ATOM_ARCHIVAL_LEVELS = {
+  FONDS: 'Fonds',
+  SECTION: 'Section',
+  SERIES: 'Series',
+  SUBSERIES: 'Subseries',
+  FILE: 'File',
+} as const satisfies Record<string, AtomArchivalLevel>;
+
 export interface AtomMappingRecord {
   readonly institutionId: string;
   readonly iciObjectType: AtomObjectType;
@@ -86,8 +96,8 @@ export interface AtomClientConfig {
 export interface AtomCreateInformationObjectInput {
   readonly identifier: string;
   readonly title: string;
-  readonly parent: AtomInformationObjectReference;
-  readonly levelOfDescription: 'File';
+  readonly parent?: AtomInformationObjectReference | undefined;
+  readonly levelOfDescription: AtomArchivalLevel;
 }
 
 export interface AtomInformationObjectDetails {
@@ -197,13 +207,15 @@ export class AtomClient {
   }
 
   public async createInformationObject(input: AtomCreateInformationObjectInput): Promise<AtomInformationObjectReference> {
-    const parentIdNumber = Number(input.parent.id);
+    const parentIdNumber = input.parent === undefined ? undefined : Number(input.parent.id);
     const result = parseCreatedReference(await this.request('POST', 'api/informationobjects', {
       identifier: input.identifier,
       title: input.title,
       level_of_description: input.levelOfDescription,
-      parent_id: Number.isSafeInteger(parentIdNumber) ? parentIdNumber : input.parent.id,
-      parent_slug: input.parent.slug,
+      ...(input.parent === undefined ? {} : {
+        parent_id: Number.isSafeInteger(parentIdNumber) ? parentIdNumber : input.parent.id,
+        parent_slug: input.parent.slug,
+      }),
     }));
     if (result.published === true || result.publicationStatus?.toLowerCase() === 'published') {
       throw new AtomAdapterError('CONFLICT', 'AtoM created a published description despite the draft-only deployment policy', { retryable: false });
@@ -247,6 +259,56 @@ export interface ExpedienteFileSyncInput {
   readonly title?: string | undefined;
 }
 
+export type IciArchivalNodeType = 'FONDS' | 'SECTION' | 'SERIES' | 'SUBSERIES';
+
+export interface ArchivalClassificationNodeRecord {
+  readonly id: string;
+  readonly institutionId: string;
+  readonly parentId: string | null;
+  readonly nodeType: IciArchivalNodeType;
+  readonly code: string;
+  readonly name: string;
+}
+
+export interface ArchivalClassificationPathLoader {
+  load(input: { readonly institutionId: string; readonly targetNodeId: string }): Promise<readonly ArchivalClassificationNodeRecord[]>;
+}
+
+export interface ClassificationHierarchySyncInput {
+  readonly institutionId: string;
+  readonly targetNodeId: string;
+}
+
+export interface ClassificationHierarchySyncResult {
+  readonly target: AtomMappingRecord;
+  readonly mappings: readonly AtomMappingRecord[];
+}
+
+export function atomLevelForClassificationNodeType(nodeType: IciArchivalNodeType): Exclude<AtomArchivalLevel, 'File'> {
+  switch (nodeType) {
+    case 'FONDS': return ATOM_ARCHIVAL_LEVELS.FONDS;
+    case 'SECTION': return ATOM_ARCHIVAL_LEVELS.SECTION;
+    case 'SERIES': return ATOM_ARCHIVAL_LEVELS.SERIES;
+    case 'SUBSERIES': return ATOM_ARCHIVAL_LEVELS.SUBSERIES;
+  }
+}
+
+function validateClassificationPath(path: readonly ArchivalClassificationNodeRecord[], institutionId: string, targetNodeId: string): void {
+  if (path.length === 0 || path[path.length - 1]?.id !== targetNodeId) throw new AtomAdapterError('MAPPING', 'The archival classification path does not terminate at the requested node', { retryable: false });
+  const expectedParent: Record<IciArchivalNodeType, IciArchivalNodeType | null> = { FONDS: null, SECTION: 'FONDS', SERIES: 'SECTION', SUBSERIES: 'SERIES' };
+  const seen = new Set<string>();
+  for (const [index, node] of path.entries()) {
+    if (node.institutionId !== institutionId || seen.has(node.id)) throw new AtomAdapterError('MAPPING', 'The archival classification path is cross-tenant or cyclic', { retryable: false });
+    seen.add(node.id);
+    const parent = index === 0 ? undefined : path[index - 1];
+    if (expectedParent[node.nodeType] === null) {
+      if (node.parentId !== null || index !== 0) throw new AtomAdapterError('MAPPING', 'A Fonds node must be the root of the archival classification path', { retryable: false });
+    } else if (parent === undefined || node.parentId !== parent.id || parent.nodeType !== expectedParent[node.nodeType]) {
+      throw new AtomAdapterError('MAPPING', `${node.nodeType} has an invalid parent in the archival classification path`, { retryable: false });
+    }
+  }
+}
+
 export interface ExpedienteFileSyncResult {
   readonly mapping: AtomMappingRecord;
   readonly created: boolean;
@@ -268,6 +330,10 @@ export interface ApprovedExpedienteAtomSyncContextLoader {
 
 function assertCompatible(reference: AtomInformationObjectDetails): void {
   if (reference.levelOfDescription === undefined || reference.levelOfDescription.toLowerCase() !== 'file') throw new AtomAdapterError('CONFLICT', 'AtoM description is not a File', { retryable: false });
+}
+
+function assertCompatibleClassification(reference: AtomInformationObjectDetails, expectedLevel: Exclude<AtomArchivalLevel, 'File'>): void {
+  if (reference.levelOfDescription === undefined || reference.levelOfDescription.toLowerCase() !== expectedLevel.toLowerCase()) throw new AtomAdapterError('CONFLICT', `AtoM description is not a ${expectedLevel}`, { retryable: false });
 }
 
 async function markFailed(store: AtomMappingStore, input: ExpedienteFileSyncInput): Promise<void> {
@@ -327,4 +393,53 @@ export async function ensureApprovedExpedienteFileDescription(client: AtomClient
     expedienteFolio: context.expedienteFolio,
     archivalParentNodeId: context.archivalParentNodeId,
   });
+}
+
+async function ensureClassificationNode(client: AtomClient, store: AtomMappingStore, node: ArchivalClassificationNodeRecord, parent: AtomMappingRecord | undefined): Promise<AtomMappingRecord> {
+  const expectedLevel = atomLevelForClassificationNodeType(node.nodeType);
+  const existing = await store.find({ institutionId: node.institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: node.id });
+  if (existing?.syncStatus === 'SYNCED' && existing.atomInformationObjectId !== null && existing.atomSlug !== null) {
+    const remote = await client.getInformationObject(existing.atomSlug);
+    assertCompatibleClassification(remote, expectedLevel);
+    return existing;
+  }
+  if (existing !== undefined) throw new AtomAdapterError('RECONCILIATION_REQUIRED', 'Classification synchronization has an incomplete local reservation; reconcile the remote description before retrying', { retryable: false, code: 'ATOM_RECONCILIATION_REQUIRED' });
+  if (node.nodeType !== 'FONDS' && (parent === undefined || parent.syncStatus !== 'SYNCED' || parent.atomInformationObjectId === null || parent.atomSlug === null)) throw new AtomAdapterError('MAPPING', 'An authoritative synchronized parent is required before creating a classification child', { retryable: false });
+  const reservation = await store.reserve({ institutionId: node.institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: node.id });
+  if (!reservation.reserved) throw new AtomAdapterError('RECONCILIATION_REQUIRED', 'Classification synchronization was reserved by another attempt; reconcile before retrying', { retryable: false, code: 'ATOM_RECONCILIATION_REQUIRED' });
+  let remote: AtomInformationObjectReference;
+  try {
+    remote = await client.createInformationObject({
+      identifier: node.code,
+      title: node.name,
+      levelOfDescription: expectedLevel,
+      ...(node.nodeType === 'FONDS' ? {} : { parent: { id: parent!.atomInformationObjectId!, slug: parent!.atomSlug! } }),
+    });
+  } catch (error) {
+    await markClassificationFailed(store, node);
+    if (error instanceof AtomAdapterError && error.kind === 'CONFLICT') throw new AtomAdapterError('RECONCILIATION_REQUIRED', 'AtoM classification creation conflicted; reconcile before retrying', { retryable: false, code: 'ATOM_RECONCILIATION_REQUIRED' });
+    throw error;
+  }
+  return store.save({ institutionId: node.institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: node.id, atomInformationObjectId: remote.id, atomSlug: remote.slug, syncStatus: 'SYNCED' });
+}
+
+async function markClassificationFailed(store: AtomMappingStore, node: ArchivalClassificationNodeRecord): Promise<void> {
+  if (store.markFailed === undefined) return;
+  await store.markFailed({ institutionId: node.institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: node.id }).catch(() => undefined);
+}
+
+/** Ensures an authoritative ICI classification path from Fonds to the target,
+ * performing one short reservation/network/save cycle per node. */
+export async function ensureAtomClassificationHierarchy(client: AtomClient, store: AtomMappingStore, loader: ArchivalClassificationPathLoader, input: ClassificationHierarchySyncInput): Promise<ClassificationHierarchySyncResult> {
+  const path = await loader.load(input);
+  validateClassificationPath(path, input.institutionId, input.targetNodeId);
+  const mappings: AtomMappingRecord[] = [];
+  for (const [index, node] of path.entries()) {
+    if (node.institutionId !== input.institutionId) throw new AtomAdapterError('MAPPING', 'The archival classification path crosses institutions', { retryable: false });
+    const parent = index === 0 ? undefined : mappings[index - 1];
+    mappings.push(await ensureClassificationNode(client, store, node, parent));
+  }
+  const target = mappings[mappings.length - 1];
+  if (target === undefined) throw new AtomAdapterError('MAPPING', 'The synchronized classification target is missing', { retryable: false });
+  return { target, mappings };
 }

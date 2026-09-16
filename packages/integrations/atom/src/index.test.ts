@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   ATOM_OBJECT_TYPES,
   AtomClient,
+  atomLevelForClassificationNodeType,
+  ensureAtomClassificationHierarchy,
   ensureExpedienteFileDescription,
   type AtomFetch,
   type AtomHttpResponse,
@@ -50,6 +52,56 @@ function storeWithParent(): MemoryMappings {
 function client(fetch: AtomFetch): AtomClient { return new AtomClient({ baseUrl: 'https://atom.example.test///', apiKey: 'secret-key', culture: 'es', timeoutMs: 100, draftPolicy: 'SERVICE_ACCOUNT_NO_PUBLISH', fetch }); }
 
 describe('AtoM 2.10 adapter', () => {
+  it('maps ICI classification types to documented AtoM levels', () => {
+    expect(atomLevelForClassificationNodeType('FONDS')).toBe('Fonds');
+    expect(atomLevelForClassificationNodeType('SECTION')).toBe('Section');
+    expect(atomLevelForClassificationNodeType('SERIES')).toBe('Series');
+    expect(atomLevelForClassificationNodeType('SUBSERIES')).toBe('Subseries');
+  });
+
+  it('ensures a Fonds-to-Subseries path parent-first with no fabricated root parent', async () => {
+    const fonds = { id: 'f', institutionId, parentId: null, nodeType: 'FONDS' as const, code: 'F', name: 'Fonds' };
+    const section = { id: 's', institutionId, parentId: 'f', nodeType: 'SECTION' as const, code: 'S', name: 'Section' };
+    const series = { id: 'r', institutionId, parentId: 's', nodeType: 'SERIES' as const, code: 'R', name: 'Series' };
+    const subseries = { id: 'ss', institutionId, parentId: 'r', nodeType: 'SUBSERIES' as const, code: 'SS', name: 'Subseries' };
+    const store = new MemoryMappings();
+    const requests: Array<{ method: string | undefined; body: Record<string, unknown> | undefined }> = [];
+    const atom = client((_, init) => {
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : undefined;
+      requests.push({ method: init?.method, body });
+      return Promise.resolve(response(201, { id: requests.length, slug: `node-${requests.length}` }));
+    });
+    const result = await ensureAtomClassificationHierarchy(atom, store, { load: () => Promise.resolve([fonds, section, series, subseries]) }, { institutionId, targetNodeId: 'ss' });
+    expect(requests.map((request) => request.body?.level_of_description)).toEqual(['Fonds', 'Section', 'Series', 'Subseries']);
+    expect(requests[0]?.body).not.toHaveProperty('parent_id');
+    expect(requests[1]?.body).toMatchObject({ parent_id: 1, parent_slug: 'node-1' });
+    expect(requests[3]?.body).toMatchObject({ parent_id: 3, parent_slug: 'node-3' });
+    expect(result.target.atomSlug).toBe('node-4');
+    expect(result.mappings).toHaveLength(4);
+  });
+
+  it('stops before network I/O when a path has an invalid parent type', async () => {
+    let calls = 0;
+    const atom = client(() => { calls += 1; return Promise.resolve(response(201, { id: 1, slug: 'unexpected' })); });
+    const invalid = [{ id: 'f', institutionId, parentId: null, nodeType: 'FONDS' as const, code: 'F', name: 'Fonds' }, { id: 'r', institutionId, parentId: 'f', nodeType: 'SERIES' as const, code: 'R', name: 'Series' }];
+    await expect(ensureAtomClassificationHierarchy(atom, storeWithParent(), { load: () => Promise.resolve(invalid) }, { institutionId, targetNodeId: 'r' })).rejects.toMatchObject({ kind: 'MAPPING' });
+    expect(calls).toBe(0);
+    expect(invalid).toHaveLength(2);
+  });
+
+  it('reuses synced ancestors and rejects an incomplete reservation without POST', async () => {
+    const fonds = { id: 'f2', institutionId, parentId: null, nodeType: 'FONDS' as const, code: 'F2', name: 'Fonds 2' };
+    const section = { id: 's2', institutionId, parentId: 'f2', nodeType: 'SECTION' as const, code: 'S2', name: 'Section 2' };
+    const series = { id: 'r2', institutionId, parentId: 's2', nodeType: 'SERIES' as const, code: 'R2', name: 'Series 2' };
+    const store = new MemoryMappings();
+    store.values.set(`${institutionId}:${ATOM_OBJECT_TYPES.archivalClassificationNode}:f2`, { institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: 'f2', atomInformationObjectId: '11', atomSlug: 'f2', syncStatus: 'SYNCED' });
+    store.values.set(`${institutionId}:${ATOM_OBJECT_TYPES.archivalClassificationNode}:s2`, { institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: 's2', atomInformationObjectId: '12', atomSlug: 's2', syncStatus: 'SYNCED' });
+    store.values.set(`${institutionId}:${ATOM_OBJECT_TYPES.archivalClassificationNode}:r2`, { institutionId, iciObjectType: ATOM_OBJECT_TYPES.archivalClassificationNode, iciObjectId: 'r2', atomInformationObjectId: null, atomSlug: null, syncStatus: 'PENDING' });
+    let posts = 0;
+    const atom = client((url, init) => { if (init?.method === 'POST') posts += 1; const path = String(url); return Promise.resolve(response(200, { level_of_description: path.includes('/f2') ? 'Fonds' : 'Section' })); });
+    await expect(ensureAtomClassificationHierarchy(atom, store, { load: () => Promise.resolve([fonds, section, series]) }, { institutionId, targetNodeId: 'r2' })).rejects.toMatchObject({ code: 'ATOM_RECONCILIATION_REQUIRED' });
+    expect(posts).toBe(0);
+  });
   it('creates a File below the mapped parent without publishing it', async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const atom = client((url, init) => {

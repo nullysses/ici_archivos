@@ -7,6 +7,8 @@ import { applyFoundationMigrations, createDatabase, type Database } from '../../
 import { createApp } from '../../apps/api/src/app.js';
 import { createMatterApplicationService } from '../../apps/api/src/matters.js';
 import { createExpedienteApplicationService } from '../../apps/api/src/expedientes.js';
+import { createArchiveTransferApplicationService } from '../../apps/api/src/transfers.js';
+import { beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, setExpedienteArchivalParentAtomically } from '../../packages/database/dist/index.js';
 import { runMalwareScanOnce } from '../../apps/worker/src/jobs.js';
 import { UnauthenticatedError, type AuthenticatedPrincipal } from '../../apps/api/src/auth.js';
 import type { DocumentStoragePort } from '../../packages/integrations/storage/dist/index.js';
@@ -20,6 +22,18 @@ const roleId = '22000000-0000-4000-8000-000000000005';
 const membershipId = '22000000-0000-4000-8000-000000000006';
 const typeId = '22000000-0000-4000-8000-000000000007';
 const typeVersionId = '22000000-0000-4000-8000-000000000008';
+const fondsId = '22000000-0000-4000-8000-000000000009';
+const sectionId = '22000000-0000-4000-8000-00000000000a';
+const seriesId = '22000000-0000-4000-8000-00000000000b';
+const archiveExpedienteId = '22000000-0000-4000-8000-00000000000c';
+const interventionExpedienteId = '22000000-0000-4000-8000-00000000000d';
+const interventionTransferId = '22000000-0000-4000-8000-00000000000e';
+const interventionManifestId = '22000000-0000-4000-8000-00000000000f';
+const interventionRemoteTransferId = '22000000-0000-4000-8000-000000000010';
+const interventionSipId = '22000000-0000-4000-8000-000000000011';
+const interventionAipId = '22000000-0000-4000-8000-000000000011';
+const interventionDipId = '22000000-0000-4000-8000-000000000012';
+const transferSourceLocationId = '22000000-0000-4000-8000-000000000013';
 
 class MemoryStorage implements DocumentStoragePort {
   private readonly objects = new Map<string, Uint8Array>();
@@ -103,14 +117,35 @@ async function main(): Promise<void> {
   await database.insertInto('access_classifications').values({ id: classificationId, institution_id: institutionId, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
   await database.insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'E2E', name: 'Expediente E2E', status: 'ACTIVE' }).execute();
   await database.insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object', properties: { title: { type: 'string', title: 'Título' } }, required: ['title'] }, archival_mapping_json: { levelOfDescription: 'File' }, created_at: new Date(), published_at: new Date() }).execute();
-
+  await database.insertInto('archival_classification_nodes').values([
+    { id: fondsId, institution_id: institutionId, parent_id: null, node_type: 'FONDS', code: 'E2E-F', name: 'Fondo E2E', metadata: {} },
+    { id: sectionId, institution_id: institutionId, parent_id: fondsId, node_type: 'SECTION', code: 'E2E-S', name: 'Sección E2E', metadata: {} },
+    { id: seriesId, institution_id: institutionId, parent_id: sectionId, node_type: 'SERIES', code: 'E2E-SER', name: 'Serie E2E', metadata: {} },
+  ]).execute();
+  const expedienteService = createExpedienteApplicationService(database);
+  await expedienteService.create({ id: archiveExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-archive-create', request: { expedienteTypeVersionId: typeVersionId, metadata: { title: 'Transferencia archivística E2E' } } });
   const storage = new MemoryStorage();
+  const archiveAuthorization = { ...authorization, institutionCapabilities: new Set([...authorization.institutionCapabilities, 'archive_transfer.prepare' as const, 'archive_transfer.approve' as const, 'archive_transfer.retry' as const, 'expediente.close' as const]) };
+  await setExpedienteArchivalParentAtomically(database, { institutionId, expedienteId: archiveExpedienteId, archivalParentNodeId: seriesId, actorUserId: userId, correlationId: 'e2e-archive-parent', authorizationContext: archiveAuthorization });
+  await expedienteService.close({ id: archiveExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-archive-close', request: { closureMetadata: { reason: 'E2E archival preparation' } }, authorization: archiveAuthorization });
+  await expedienteService.create({ id: interventionExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-intervention-create', request: { expedienteTypeVersionId: typeVersionId, metadata: { title: 'Intervención archivística E2E' } } });
+  await setExpedienteArchivalParentAtomically(database, { institutionId, expedienteId: interventionExpedienteId, archivalParentNodeId: seriesId, actorUserId: userId, correlationId: 'e2e-intervention-parent', authorizationContext: archiveAuthorization });
+  await expedienteService.close({ id: interventionExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-intervention-close', request: { closureMetadata: { reason: 'E2E intervention preparation' } }, authorization: archiveAuthorization });
+  const archiveTransferService = createArchiveTransferApplicationService(database);
+  await archiveTransferService.create({ institutionId, expedienteId: interventionExpedienteId, transferId: interventionTransferId, manifestId: interventionManifestId, actorUserId: userId, correlationId: 'e2e-intervention-transfer-create', authorization: archiveAuthorization });
+  await archiveTransferService.approve({ institutionId, transferId: interventionTransferId, actorUserId: userId, correlationId: 'e2e-intervention-transfer-approve', authorization: archiveAuthorization });
+  const interventionClaim = (await claimArchiveTransferPreservationJobs(database, institutionId, 1)).find((job) => job.aggregate_id === interventionTransferId);
+  if (interventionClaim?.claim_token === null || interventionClaim === undefined) throw new Error('Intervention fixture could not claim preservation intent');
+  await beginArchiveTransferPreservationAtomically(database, { institutionId, transferId: interventionTransferId, jobId: interventionClaim.id, claimToken: interventionClaim.claim_token, correlationId: 'e2e-intervention-begin' });
+  await database.insertInto('archivematica_transfers').values({ institution_id: institutionId, archive_transfer_id: interventionTransferId, submission_status: 'SUBMITTED', archivematica_transfer_uuid: interventionRemoteTransferId, sip_uuid: interventionSipId, aip_uuid: interventionAipId, dip_uuid: interventionDipId, processing_configuration: 'e2e', transfer_source_location_uuid: transferSourceLocationId, transfer_source_relative_path: 'e2e/intervention', last_remote_status: 'COMPLETE', last_ingest_status: 'COMPLETE', last_checked_at: new Date() }).execute();
+  await database.updateTable('integration_jobs').set({ last_error: 'PRESERVATION_INTERVENTION_REQUIRED: AtoM Item correlation is not independently provable' }).where('institution_id', '=', institutionId).where('id', '=', interventionClaim.id).execute();
   app = await createApp({
     authenticateAccessToken: (token) => token === 'e2e-token'
-      ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization })
+      ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization: archiveAuthorization })
       : Promise.reject(new UnauthenticatedError()),
     matterService: createMatterApplicationService(database),
-    expedienteService: createExpedienteApplicationService(database),
+    expedienteService: expedienteService,
+    archiveTransferService,
     database,
     documentDependencies: { database, storage, maxBytes: 1024n * 1024n },
     checkDatabase: () => Promise.resolve(true),

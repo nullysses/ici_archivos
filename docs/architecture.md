@@ -55,3 +55,15 @@ Archivematica's native DIP upload. AtoM publication and direct DIP/SWORD calls
 remain outside ICI's boundary. Transfer and ingest `USER_INPUT`, incomplete
 SIP/AIP evidence, and unavailable public proof of DIP delivery are surfaced as
 intervention outcomes, not silently classified as successful preservation.
+
+## Archivista work area
+
+The authenticated `/archive` area is a read-oriented projection of the frozen
+transfer and preservation evidence. It groups closed expedientes ready for
+preparation and transfers into approval, active-preservation, intervention,
+and completed queues. Transfer detail reads expose the immutable manifest,
+classification path, AtoM/Archivematica references, staging evidence, and
+authoritative activity. `USER_INPUT`, reconciliation, and the M11
+`PRESERVATION_INTERVENTION_REQUIRED` boundary remain explicit human-action
+states; the UI never marks a transfer complete from a DIP UUID alone and never
+offers blind resubmission.

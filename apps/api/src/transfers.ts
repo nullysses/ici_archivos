@@ -8,6 +8,8 @@ import {
   ArchiveTransferResponseSchema,
   ArchiveTransferRetryRequestSchema,
   ArchiveTransferCancelRequestSchema,
+  ArchiveTransferQueueResponseSchema,
+  ArchiveTransferWorkspaceResponseSchema,
   MatterErrorSchema,
   type ArchiveTransferApproveRequest,
   type ArchiveTransferCreateRequest,
@@ -16,6 +18,8 @@ import {
   type ArchiveTransferResponse,
   type ArchiveTransferRetryRequest,
   type ArchiveTransferCancelRequest,
+  type ArchiveTransferQueueResponse,
+  type ArchiveTransferWorkspaceResponse,
 } from '@ici/contracts';
 import {
   approveArchiveTransferManifestAtomically,
@@ -23,8 +27,12 @@ import {
   canPerform,
   createArchiveTransferAndDraftManifestAtomically,
   findArchiveTransferWithManifest,
+  findArchiveTransferQueueAuthorized,
+  findArchiveTransferWorkspaceAuthorized,
   retryArchiveTransferAtomically,
   type ArchiveTransferReadModel,
+  type ArchiveTransferQueueReadModel,
+  type ArchiveTransferWorkspaceReadModel,
   type Database,
 } from '@ici/database';
 import type { AuthenticatedPrincipal } from './auth.js';
@@ -48,6 +56,8 @@ export interface ArchiveTransferApplicationService {
   retry(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   cancel(input: { readonly institutionId: string; readonly transferId: string; readonly actorUserId: string; readonly reason: string; readonly correlationId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferReadModel>;
   byId(institutionId: string, transferId: string): Promise<ArchiveTransferReadModel | undefined>;
+  queue(input: { readonly institutionId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferQueueReadModel>;
+  workspace(input: { readonly institutionId: string; readonly transferId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ArchiveTransferWorkspaceReadModel | undefined>;
 }
 
 export function createArchiveTransferApplicationService(database: Database): ArchiveTransferApplicationService {
@@ -84,6 +94,8 @@ export function createArchiveTransferApplicationService(database: Database): Arc
       authorizationContext: input.authorization,
     }),
     byId: (institutionId, transferId) => findArchiveTransferWithManifest(database, { institutionId, transferId }),
+    queue: (input) => findArchiveTransferQueueAuthorized(database, { institutionId: input.institutionId, authorizationContext: input.authorization }),
+    workspace: (input) => findArchiveTransferWorkspaceAuthorized(database, { institutionId: input.institutionId, transferId: input.transferId, authorizationContext: input.authorization }),
   };
 }
 
@@ -118,6 +130,27 @@ export function installArchiveTransferRoutes(app: FastifyInstance, service: Arch
       if (result === undefined) throw new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
       if (!canPerform(request.principal.authorization, 'records.read')) throw new TransferHttpError(403, 'FORBIDDEN', 'Access denied');
       return reply.code(200).send(toArchiveTransferResponse(result));
+    },
+  );
+
+  app.get<{ Reply: ArchiveTransferQueueResponse }>(
+    '/archive/queue',
+    { preHandler, schema: { response: { 200: ArchiveTransferQueueResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try { return reply.code(200).send(toArchiveTransferQueueResponse(await service.queue({ institutionId: request.principal.institutionId, authorization: request.principal.authorization }))); }
+      catch (error) { throw mapTransferError(error); }
+    },
+  );
+
+  app.get<{ Params: ArchiveTransferIdParams; Reply: ArchiveTransferWorkspaceResponse }>(
+    '/archive-transfers/:transferId/workspace',
+    { preHandler, schema: { params: ArchiveTransferIdParamsSchema, response: { 200: ArchiveTransferWorkspaceResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try {
+        const result = await service.workspace({ institutionId: request.principal.institutionId, transferId: request.params.transferId, authorization: request.principal.authorization });
+        if (result === undefined) throw new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
+        return reply.code(200).send(toArchiveTransferWorkspaceResponse(result));
+      } catch (error) { throw mapTransferError(error); }
     },
   );
 
@@ -164,7 +197,7 @@ function mapTransferError(error: unknown): TransferHttpError {
   if (code === '40P01') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
   if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') return new TransferHttpError(403, 'FORBIDDEN', 'Access denied');
   if (code === 'EXPEDIENTE_NOT_FOUND' || code === 'TRANSFER_NOT_FOUND' || code === 'MANIFEST_NOT_FOUND') return new TransferHttpError(404, 'TRANSFER_NOT_FOUND', 'Archive transfer not found');
-  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'ARCHIVAL_PARENT_REQUIRED' || code === 'ARCHIVAL_PARENT_INVALID' || code === 'TRANSFER_NOT_READY' || code === 'INVALID_ARCHIVAL_MAPPING' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE' || code === 'MANIFEST_NOT_APPROVED' || code === 'MANIFEST_HASH_MISMATCH' || code === 'INVALID_JOB_STATE' || code === 'CANCELLATION_NOT_SAFE' || code === 'TRANSFER_NOT_COMPLETE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
+  if (code === 'EXPEDIENTE_NOT_CLOSED' || code === 'EXPEDIENTE_NOT_TRANSFER_PENDING' || code === 'ARCHIVAL_PARENT_REQUIRED' || code === 'ARCHIVAL_PARENT_INVALID' || code === 'ARCHIVAL_HIERARCHY_INVALID' || code === 'ARCHIVAL_NODE_NOT_FOUND' || code === 'TRANSFER_NOT_READY' || code === 'INVALID_ARCHIVAL_MAPPING' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'INVALID_TRANSITION' || code === 'MANIFEST_IMMUTABLE' || code === 'MANIFEST_NOT_APPROVED' || code === 'MANIFEST_HASH_MISMATCH' || code === 'INVALID_JOB_STATE' || code === 'CANCELLATION_NOT_SAFE' || code === 'TRANSFER_NOT_COMPLETE') return new TransferHttpError(409, 'INVALID_TRANSITION', 'Archive transfer cannot proceed in its current state');
   if (code === 'REASON_REQUIRED' || code === 'INVALID_JOB_ERROR') return new TransferHttpError(400, 'INVALID_REQUEST', 'Request validation failed');
   throw error;
 }
@@ -199,6 +232,49 @@ function toArchiveTransferResponse(model: ArchiveTransferReadModel): ArchiveTran
       approvedAt: model.manifest.approved_at === null ? null : new Date(model.manifest.approved_at).toISOString(),
       documents,
     },
+  };
+}
+
+function toArchiveTransferQueueResponse(model: ArchiveTransferQueueReadModel): ArchiveTransferQueueResponse {
+  return {
+    readyForPreparation: model.readyForPreparation.map((item) => ({ expedienteId: item.expedienteId, expedienteFolio: item.expedienteFolio, status: 'CLOSED' as const, archivalPath: item.archivalPath.map((node) => ({ id: node.id, nodeType: node.nodeType, code: node.code, name: node.name })) })),
+    transfers: model.transfers.map((item) => ({
+      transferId: item.transfer.id,
+      expedienteId: item.expediente.id,
+      expedienteFolio: item.expediente.folio,
+      transferStatus: item.transfer.status,
+      manifestStatus: item.manifest.status,
+      updatedAt: new Date(item.transfer.updated_at).toISOString(),
+      createdAt: new Date(item.transfer.created_at).toISOString(),
+      category: item.category,
+      archivalPath: item.archivalPath.map((node) => ({ id: node.id, nodeType: node.nodeType, code: node.code, name: node.name })),
+      intervention: item.intervention,
+    })),
+  };
+}
+
+function toArchiveTransferWorkspaceResponse(model: ArchiveTransferWorkspaceReadModel): ArchiveTransferWorkspaceResponse {
+  const evidence = model.evidence === null ? null : {
+    submissionStatus: model.evidence.submissionStatus,
+    archivematicaTransferUuid: model.evidence.archivematicaTransferUuid,
+    sipUuid: model.evidence.sipUuid,
+    aipUuid: model.evidence.aipUuid,
+    dipUuid: model.evidence.dipUuid,
+    lastRemoteStatus: model.evidence.lastRemoteStatus ?? null,
+    lastIngestStatus: model.evidence.lastIngestStatus ?? null,
+    lastCheckedAt: model.evidence.lastCheckedAt === null || model.evidence.lastCheckedAt === undefined ? null : new Date(model.evidence.lastCheckedAt).toISOString(),
+  };
+  const staging = model.staging === null ? null : { status: model.staging.status, locationUuid: model.staging.locationUuid, relativePath: model.staging.relativePath, manifestSha256: model.staging.manifestSha256 };
+  return {
+    transfer: toArchiveTransferResponse({ transfer: model.transfer, manifest: model.manifest }),
+    expediente: model.expediente,
+    archivalPath: model.archivalPath.map((node) => ({ id: node.id, nodeType: node.nodeType, code: node.code, name: node.name })),
+    atom: model.atom,
+    evidence,
+    staging,
+    intervention: model.intervention,
+    job: model.job,
+    activity: model.activity.map((event) => ({ id: event.id, eventType: event.eventType, occurredAt: new Date(event.occurredAt).toISOString(), actorUserId: event.actorUserId })),
   };
 }
 

@@ -25,7 +25,7 @@ test('completes the Oficialía to Gestor operational workflow', async ({ page })
   await page.getByRole('option', { name: /Expediente E2E/ }).click();
   await page.getByLabel('Título').fill('Expediente operativo E2E');
   await page.getByRole('button', { name: 'Crear expediente' }).last().click();
-  const expedienteLink = page.getByRole('link', { name: /EXP-\d{4}-\d{6}/ });
+  const expedienteLink = page.getByRole('link', { name: /EXP-\d{4}-\d{6}/ }).first();
   await expect(expedienteLink).toBeVisible();
   const expedienteFolio = await expedienteLink.textContent();
   await expedienteLink.click();

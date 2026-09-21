@@ -6,6 +6,7 @@ import {
   completeArchiveTransferPreservationAtomically,
   failArchiveTransferPreservationAtomically,
   findArchiveTransferWithManifest,
+  recordArchiveTransferPreservationDiagnostic,
   claimMalwareScanJobs,
   findMalwareScanTarget,
   recordMalwareScanResultAtomically,
@@ -188,6 +189,13 @@ export async function processClaimedArchiveTransferPreservationJob(
     if (error !== null && typeof error === 'object' && 'code' in error && ((error as { readonly code?: unknown }).code === 'PRESERVATION_INTERVENTION_REQUIRED' || (error as { readonly code?: unknown }).code === 'PRESERVATION_EXECUTION_DEFERRED')) {
       // Human intervention is not a preservation failure. Leave the fenced
       // RUNNING intent for lease reclamation after the intervention is resolved.
+      await recordArchiveTransferPreservationDiagnostic(dependencies.database, {
+        institutionId: job.institution_id,
+        transferId: job.aggregate_id,
+        jobId: job.id,
+        claimToken: job.claim_token,
+        diagnostic: preservationFailureReason(error),
+      }).catch(() => undefined);
       return;
     }
     // A stale/reclaimed token or a transfer cancelled by another actor is

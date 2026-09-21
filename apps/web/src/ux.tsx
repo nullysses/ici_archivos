@@ -73,8 +73,8 @@ function StatePanel({ icon, title, description }: { readonly icon: ReactNode; re
   return <Stack alignItems="center" justifyContent="center" spacing={1.5} sx={{ minHeight: 280, textAlign: 'center' }}>{icon}<Typography component="h2" variant="h5">{title}</Typography><Typography color="text.secondary" maxWidth={520}>{description}</Typography></Stack>;
 }
 
-export function ConfirmAction({ open, title, consequence, confirmLabel = 'Confirmar', onCancel, onConfirm }: { readonly open: boolean; readonly title: string; readonly consequence: string; readonly confirmLabel?: string; readonly onCancel: () => void; readonly onConfirm: () => void }): ReactElement {
-  return <Dialog aria-labelledby="confirmation-title" fullWidth maxWidth="sm" onClose={onCancel} open={open}><DialogTitle id="confirmation-title">{title}</DialogTitle><DialogContent><Typography>{consequence}</Typography></DialogContent><DialogActions><Button onClick={onCancel}>Cancelar</Button><Button color="error" onClick={onConfirm} variant="contained">{confirmLabel}</Button></DialogActions></Dialog>;
+export function ConfirmAction({ open, title, consequence, confirmLabel = 'Confirmar', confirmDisabled = false, onCancel, onConfirm }: { readonly open: boolean; readonly title: string; readonly consequence: string; readonly confirmLabel?: string; readonly confirmDisabled?: boolean; readonly onCancel: () => void; readonly onConfirm: () => void }): ReactElement {
+  return <Dialog aria-labelledby="confirmation-title" fullWidth maxWidth="sm" onClose={onCancel} open={open}><DialogTitle id="confirmation-title">{title}</DialogTitle><DialogContent><Typography>{consequence}</Typography></DialogContent><DialogActions><Button disabled={confirmDisabled} onClick={onCancel}>Cancelar</Button><Button color="error" disabled={confirmDisabled} onClick={onConfirm} variant="contained">{confirmDisabled ? 'Procesando…' : confirmLabel}</Button></DialogActions></Dialog>;
 }
 
 export function useConfirmAction(): { readonly open: boolean; readonly ask: () => void; readonly cancel: () => void; readonly confirm: (action: () => void) => void } {

@@ -3,8 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createBrowserRouter, Navigate, RouterProvider } from 'react-router';
-import { AdminRoute, App, ArchiveRoute, RouteError, WorkRoute } from './App.js';
+import { AdminRoute, App, RouteError, WorkRoute } from './App.js';
 import { ExpedienteDetailPage, ExpedientesPage, MatterDetailPage, MattersPage } from './operational.js';
+import { ArchivePage, ArchiveTransferDetailPage } from './archive.js';
 import { NotFoundState } from './ux.js';
 
 const queryClient = new QueryClient();
@@ -32,8 +33,8 @@ const router = createBrowserRouter([{
     { path: 'matters/:matterId', element: <MatterDetailPage /> },
     { path: 'expedientes', element: <ExpedientesPage /> },
     { path: 'expedientes/:expedienteId', element: <ExpedienteDetailPage /> },
-    { path: 'archive', element: <ArchiveRoute /> },
-    { path: 'archive/transfers/:transferId', element: <NotFoundState /> },
+    { path: 'archive', element: <ArchivePage /> },
+    { path: 'archive/transfers/:transferId', element: <ArchiveTransferDetailPage /> },
     { path: 'admin/units', element: <AdminRoute capability="identity.manage" description="La administración de unidades estará disponible en el siguiente ciclo." title="Unidades" /> },
     { path: 'admin/access', element: <AdminRoute capability="identity.manage" description="Gestiona el acceso institucional con capacidades, no con etiquetas de rol." title="Usuarios y acceso" /> },
     { path: 'admin/expediente-types', element: <AdminRoute capability="expediente_type.manage_draft" description="Configura tipos de expediente y sus versiones publicables." title="Tipos de expediente" /> },

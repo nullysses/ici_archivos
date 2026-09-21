@@ -19,6 +19,8 @@ const typeB = '21000000-0000-4000-8000-000000000008';
 const publishedVersionB = '21000000-0000-4000-8000-000000000009';
 const documentClassification = '21000000-0000-4000-8000-00000000000c';
 const documentExpediente = '21000000-0000-4000-8000-00000000000d';
+const archivalFondsA = '21000000-0000-4000-8000-00000000000f';
+const archivalSectionA = '21000000-0000-4000-8000-000000000010';
 const archivalParentA = '21000000-0000-4000-8000-00000000000e';
 
 describe('expediente core HTTP API with real PostgreSQL', () => {
@@ -51,7 +53,11 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
       { id: retiredVersionA, institution_id: institutionA, expediente_type_id: typeA, version_number: 2, status: 'DRAFT', schema_json: schema, archival_mapping_json: {} },
       { id: publishedVersionB, institution_id: institutionB, expediente_type_id: typeB, version_number: 1, status: 'PUBLISHED', schema_json: schema, archival_mapping_json: {}, published_at: new Date('2026-01-01T00:00:00.000Z') },
     ]).execute();
-    await database.insertInto('archival_classification_nodes').values({ id: archivalParentA, institution_id: institutionA, node_type: 'SERIES', code: 'EXP-SERIES', name: 'Expediente series', metadata: {} }).execute();
+    await database.insertInto('archival_classification_nodes').values([
+      { id: archivalFondsA, institution_id: institutionA, node_type: 'FONDS', parent_id: null, code: 'EXP-FONDS', name: 'Expediente fonds', metadata: {} },
+      { id: archivalSectionA, institution_id: institutionA, node_type: 'SECTION', parent_id: archivalFondsA, code: 'EXP-SECTION', name: 'Expediente section', metadata: {} },
+      { id: archivalParentA, institution_id: institutionA, node_type: 'SERIES', parent_id: archivalSectionA, code: 'EXP-SERIES', name: 'Expediente series', metadata: {} },
+    ]).execute();
     await database.updateTable('expediente_type_versions').set({ status: 'PUBLISHED', published_at: new Date('2026-01-01T00:00:00.000Z') }).where('id', '=', retiredVersionA).execute();
     await database.updateTable('expediente_type_versions').set({ status: 'RETIRED' }).where('id', '=', retiredVersionA).execute();
     principal = {
@@ -287,6 +293,13 @@ describe('expediente core HTTP API with real PostgreSQL', () => {
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'archive_transfer').where('aggregate_id', '=', draftBody.id).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.submitted' }, { event_type: 'archive_transfer.preserving' }, { event_type: 'archive_transfer.failed' }, { event_type: 'archive_transfer.retried' }, { event_type: 'archive_transfer.completed' }]));
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_completed' }]));
     expect((await api().inject({ method: 'GET', url: `/archive-transfers/${draftBody.id}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(200);
+    const queue = await api().inject({ method: 'GET', url: '/archive/queue', headers: { authorization: 'Bearer test' } });
+    expect(queue.statusCode).toBe(200);
+    expect(queue.json<{ transfers: Array<{ transferId: string; category: string }> }>().transfers.find((item) => item.transferId === draftBody.id)).toMatchObject({ transferId: draftBody.id, category: 'COMPLETADOS' });
+    const workspace = await api().inject({ method: 'GET', url: `/archive-transfers/${draftBody.id}/workspace`, headers: { authorization: 'Bearer test' } });
+    expect(workspace.statusCode).toBe(200);
+    expect(workspace.json<{ transfer: { status: string; manifest: { status: string; sha256: string | null } }; expediente: { status: string }; activity: Array<{ eventType: string }> }>()).toMatchObject({ transfer: { status: 'COMPLETED', manifest: { status: 'APPROVED' } }, expediente: { status: 'TRANSFERRED' } });
+    expect(workspace.json<{ activity: Array<{ eventType: string }> }>().activity.map((event) => event.eventType)).toEqual(expect.arrayContaining(['archive_transfer.approved', 'archive_transfer.completed']));
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_id', '=', draftBody.id).execute()).toEqual(expect.arrayContaining([{ event_type: 'archive_transfer.created' }, { event_type: 'archive_transfer.approved' }]));
     expect(await db().selectFrom('audit_events').select('event_type').where('institution_id', '=', institutionA).where('aggregate_type', '=', 'expediente').where('aggregate_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ event_type: 'expediente.transfer_prepared' }]));
     expect(await db().selectFrom('expediente_state_events').select(['from_status', 'to_status', 'command']).where('institution_id', '=', institutionA).where('expediente_id', '=', expedienteId).execute()).toEqual(expect.arrayContaining([{ from_status: 'CLOSED', to_status: 'TRANSFER_PENDING', command: 'prepareTransfer' }]));

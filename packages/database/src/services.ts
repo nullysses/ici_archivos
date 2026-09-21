@@ -1362,6 +1362,138 @@ export async function findArchiveTransferWithManifest(database: Database, input:
   });
 }
 
+export interface ArchiveTransferPathNodeReadModel {
+  readonly id: string;
+  readonly nodeType: ArchivalClassificationNodesTable['node_type'];
+  readonly code: string;
+  readonly name: string;
+}
+
+export type ArchiveTransferQueueCategory = 'POR_APROBAR' | 'EN_PRESERVACION' | 'REQUIEREN_ATENCION' | 'COMPLETADOS' | 'OTROS';
+
+export interface ArchiveTransferInterventionReadModel {
+  readonly kind: 'USER_INPUT' | 'RECONCILIATION' | 'PRESERVATION_INTERVENTION' | 'FAILURE';
+  readonly message: string;
+}
+
+export interface ArchiveTransferWorkspaceReadModel {
+  readonly transfer: Selectable<ArchiveTransfersTable>;
+  readonly manifest: Selectable<TransferManifestsTable>;
+  readonly expediente: Pick<Selectable<ExpedientesTable>, 'id' | 'folio' | 'status'>;
+  readonly archivalPath: readonly ArchiveTransferPathNodeReadModel[];
+  readonly atom: { readonly parent: { readonly id: string; readonly slug: string } | null; readonly file: { readonly id: string; readonly slug: string } | null };
+  readonly evidence: ArchivematicaTransferPersistenceRecord | null;
+  readonly staging: PreservationStagingPersistenceRecord | null;
+  readonly intervention: ArchiveTransferInterventionReadModel | null;
+  readonly activity: readonly { readonly id: string; readonly eventType: string; readonly occurredAt: Date; readonly actorUserId: string | null }[];
+  readonly category: ArchiveTransferQueueCategory;
+  readonly job: { readonly status: IntegrationJobsTable['status']; readonly attemptCount: number; readonly lastError: string | null } | null;
+}
+
+export interface ArchiveTransferReadyExpedienteReadModel {
+  readonly expedienteId: string;
+  readonly expedienteFolio: string;
+  readonly archivalPath: readonly ArchiveTransferPathNodeReadModel[];
+}
+
+export interface ArchiveTransferQueueReadModel {
+  readonly readyForPreparation: readonly ArchiveTransferReadyExpedienteReadModel[];
+  readonly transfers: readonly ArchiveTransferWorkspaceReadModel[];
+}
+
+async function loadArchivePathInTransaction(transaction: DatabaseTransaction, institutionId: InstitutionId | string, targetNodeId: string | null): Promise<readonly ArchiveTransferPathNodeReadModel[]> {
+  const reverse: ArchiveTransferPathNodeReadModel[] = [];
+  const visited = new Set<string>();
+  const expectedParent: Record<ArchivalClassificationNodesTable['node_type'], ArchivalClassificationNodesTable['node_type'] | null> = { FONDS: null, SECTION: 'FONDS', SERIES: 'SECTION', SUBSERIES: 'SERIES' };
+  let nodeId = targetNodeId;
+  while (nodeId !== null) {
+    if (visited.has(nodeId)) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', 'The archival classification hierarchy contains a cycle');
+    visited.add(nodeId);
+    const node = await transaction.selectFrom('archival_classification_nodes').select(['id', 'parent_id', 'node_type', 'code', 'name']).where('institution_id', '=', institutionId).where('id', '=', nodeId).executeTakeFirst();
+    if (node === undefined) throw new DomainInvariantError('ARCHIVAL_NODE_NOT_FOUND', 'Archival classification node not found');
+    const parentType = expectedParent[node.node_type];
+    if (parentType === null && node.parent_id !== null) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', 'A Fonds node must be a root node');
+    if (parentType !== null) {
+      if (node.parent_id === null) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', `${node.node_type} must have a ${parentType} parent`);
+      const parent = await transaction.selectFrom('archival_classification_nodes').select('node_type').where('institution_id', '=', institutionId).where('id', '=', node.parent_id).executeTakeFirst();
+      if (parent === undefined || parent.node_type !== parentType) throw new DomainInvariantError('ARCHIVAL_HIERARCHY_INVALID', `${node.node_type} has an invalid parent type`);
+    }
+    reverse.push({ id: node.id, nodeType: node.node_type, code: node.code, name: node.name });
+    nodeId = node.parent_id;
+  }
+  return reverse.reverse();
+}
+
+function deriveArchiveTransferIntervention(input: {
+  readonly staging: PreservationStagingPersistenceRecord | null;
+  readonly evidence: ArchivematicaTransferPersistenceRecord | null;
+  readonly job: { readonly status: IntegrationJobsTable['status']; readonly lastError: string | null } | null;
+}): ArchiveTransferInterventionReadModel | null {
+  if (input.evidence?.lastRemoteStatus === 'USER_INPUT' || input.evidence?.lastIngestStatus === 'USER_INPUT') return { kind: 'USER_INPUT', message: 'Archivematica solicita una decisión humana antes de continuar.' };
+  if (input.staging?.status === 'RECONCILIATION_REQUIRED' || input.evidence?.submissionStatus === 'RECONCILIATION_REQUIRED' || input.job?.lastError?.includes('RECONCILIATION') === true || input.job?.lastError?.includes('IDENTITY_CONFLICT') === true) return { kind: 'RECONCILIATION', message: 'La operación remota no puede reintentarse de forma segura sin reconciliación.' };
+  if (input.job?.lastError?.includes('PRESERVATION_INTERVENTION_REQUIRED') === true || input.job?.lastError?.includes('not independently provable') === true) return { kind: 'PRESERVATION_INTERVENTION', message: 'La preservación llegó al límite de evidencia automática y requiere verificación humana.' };
+  if (input.job?.status === 'FAILED') return { kind: 'FAILURE', message: input.job.lastError ?? 'La preservación falló y puede requerir reintento.' };
+  return null;
+}
+
+function deriveArchiveTransferCategory(transfer: Selectable<ArchiveTransfersTable>, intervention: ArchiveTransferInterventionReadModel | null): ArchiveTransferQueueCategory {
+  if (intervention !== null) return 'REQUIEREN_ATENCION';
+  if (transfer.status === 'DRAFT') return 'POR_APROBAR';
+  if (transfer.status === 'APPROVED' || transfer.status === 'SUBMITTED' || transfer.status === 'PRESERVING') return 'EN_PRESERVACION';
+  if (transfer.status === 'COMPLETED') return 'COMPLETADOS';
+  return 'OTROS';
+}
+
+async function loadArchiveTransferWorkspaceInTransaction(transaction: DatabaseTransaction, institutionId: InstitutionId | string, transferId: string): Promise<ArchiveTransferWorkspaceReadModel | undefined> {
+  const transfer = await transaction.selectFrom('archive_transfers').selectAll().where('institution_id', '=', institutionId).where('id', '=', transferId).executeTakeFirst();
+  if (transfer === undefined) return undefined;
+  const manifest = await transaction.selectFrom('transfer_manifests').selectAll().where('institution_id', '=', institutionId).where('transfer_id', '=', transferId).executeTakeFirst();
+  const expediente = await transaction.selectFrom('expedientes').select(['id', 'folio', 'status', 'archival_parent_node_id']).where('institution_id', '=', institutionId).where('id', '=', transfer.expediente_id).executeTakeFirst();
+  if (manifest === undefined || expediente === undefined) return undefined;
+  const archivalPath = await loadArchivePathInTransaction(transaction, institutionId, expediente.archival_parent_node_id);
+  const parentMapping = expediente.archival_parent_node_id === null ? undefined : await transaction.selectFrom('atom_mappings').select(['atom_information_object_id', 'atom_slug', 'sync_status']).where('institution_id', '=', institutionId).where('ici_object_type', '=', atomObjectTypes.archivalClassificationNode).where('ici_object_id', '=', expediente.archival_parent_node_id).executeTakeFirst();
+  const fileMapping = await transaction.selectFrom('atom_mappings').select(['atom_information_object_id', 'atom_slug', 'sync_status']).where('institution_id', '=', institutionId).where('ici_object_type', '=', atomObjectTypes.expediente).where('ici_object_id', '=', expediente.id).executeTakeFirst();
+  const atom = {
+    parent: parentMapping?.sync_status === 'SYNCED' && parentMapping.atom_information_object_id !== null && parentMapping.atom_slug !== null ? { id: parentMapping.atom_information_object_id, slug: parentMapping.atom_slug } : null,
+    file: fileMapping?.sync_status === 'SYNCED' && fileMapping.atom_information_object_id !== null && fileMapping.atom_slug !== null ? { id: fileMapping.atom_information_object_id, slug: fileMapping.atom_slug } : null,
+  };
+  const evidenceRow = await transaction.selectFrom('archivematica_transfers').selectAll().where('institution_id', '=', institutionId).where('archive_transfer_id', '=', transferId).executeTakeFirst();
+  const stagingRow = await transaction.selectFrom('preservation_staging_records').selectAll().where('institution_id', '=', institutionId).where('archive_transfer_id', '=', transferId).executeTakeFirst();
+  const jobRow = await transaction.selectFrom('integration_jobs').select(['status', 'attempt_count', 'last_error']).where('institution_id', '=', institutionId).where('job_type', '=', archivePreservationJobType).where('aggregate_type', '=', archivePreservationAggregateType).where('aggregate_id', '=', transferId).executeTakeFirst();
+  const activity = await transaction.selectFrom('audit_events').select(['id', 'event_type', 'occurred_at', 'actor_user_id']).where('institution_id', '=', institutionId).where('aggregate_type', '=', archivePreservationAggregateType).where('aggregate_id', '=', transferId).orderBy('occurred_at').orderBy('id').execute();
+  const evidence = evidenceRow === undefined ? null : toArchivematicaRecord(evidenceRow);
+  const staging = stagingRow === undefined ? null : toPreservationStagingRecord(stagingRow);
+  const job = jobRow === undefined ? null : { status: jobRow.status, attemptCount: jobRow.attempt_count, lastError: jobRow.last_error };
+  const intervention = deriveArchiveTransferIntervention({ staging, evidence, job });
+  return { transfer, manifest, expediente: { id: expediente.id, folio: expediente.folio, status: expediente.status }, archivalPath, atom, evidence, staging, intervention, activity: activity.map((event) => ({ id: event.id, eventType: event.event_type, occurredAt: event.occurred_at, actorUserId: event.actor_user_id })), category: deriveArchiveTransferCategory(transfer, intervention), job };
+}
+
+export async function findArchiveTransferWorkspaceAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly authorizationContext: AuthorizationContext }): Promise<ArchiveTransferWorkspaceReadModel | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Archive transfer reads require records.read');
+    return loadArchiveTransferWorkspaceInTransaction(transaction, input.institutionId, input.transferId);
+  });
+}
+
+export async function findArchiveTransferQueueAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<ArchiveTransferQueueReadModel> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Archive transfer reads require records.read');
+    const closedExpedientes = await transaction.selectFrom('expedientes').select(['id', 'folio', 'archival_parent_node_id']).where('institution_id', '=', input.institutionId).where('status', '=', 'CLOSED').where('archival_parent_node_id', 'is not', null).orderBy('closed_at', 'desc').orderBy('id').execute();
+    const readyForPreparation: ArchiveTransferReadyExpedienteReadModel[] = [];
+    for (const expediente of closedExpedientes) {
+      const existing = await transaction.selectFrom('archive_transfers').select('status').where('institution_id', '=', input.institutionId).where('expediente_id', '=', expediente.id).execute();
+      if (existing.length === 0 || existing.every((transfer) => transfer.status === 'CANCELLED')) readyForPreparation.push({ expedienteId: expediente.id, expedienteFolio: expediente.folio, archivalPath: await loadArchivePathInTransaction(transaction, input.institutionId, expediente.archival_parent_node_id) });
+    }
+    const transfers = await transaction.selectFrom('archive_transfers').select('id').where('institution_id', '=', input.institutionId).orderBy('updated_at', 'desc').orderBy('id').execute();
+    const workspaces: ArchiveTransferWorkspaceReadModel[] = [];
+    for (const transfer of transfers) {
+      const workspace = await loadArchiveTransferWorkspaceInTransaction(transaction, input.institutionId, transfer.id);
+      if (workspace !== undefined) workspaces.push(workspace);
+    }
+    return { readyForPreparation, transfers: workspaces };
+  });
+}
+
 export const atomObjectTypes = {
   archivalClassificationNode: 'ARCHIVAL_CLASSIFICATION_NODE',
   expediente: 'EXPEDIENTE',
@@ -1870,6 +2002,18 @@ export async function failArchiveTransferPreservationAtomically(database: Databa
     await transaction.updateTable('archive_transfers').set({ status: 'FAILED', updated_at: failedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.transferId).execute();
     await transaction.updateTable('integration_jobs').set({ status: 'FAILED', last_error: input.reason, lease_expires_at: null, claim_token: null, updated_at: failedAt }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).where('status', '=', 'RUNNING').where('claim_token', '=', input.claimToken).executeTakeFirstOrThrow();
     await appendAuditEvent(transaction, { institutionId: input.institutionId, eventType: 'archive_transfer.failed', aggregateType: archivePreservationAggregateType, aggregateId: input.transferId, correlationId: input.correlationId, beforeData: { status: transfer.status }, afterData: { status: 'FAILED' }, eventData: { jobId: input.jobId, reason: input.reason } });
+  });
+}
+
+/** Stores a bounded intervention/deferred diagnostic without changing the
+ * durable job state. The claim token fences stale workers while leaving the
+ * RUNNING intent reclaimable after the human condition is resolved. */
+export async function recordArchiveTransferPreservationDiagnostic(database: Database, input: { readonly institutionId: InstitutionId | string; readonly transferId: string; readonly jobId: string; readonly claimToken: string; readonly diagnostic: string }): Promise<void> {
+  if (input.diagnostic.trim().length === 0 || input.diagnostic.length > 4000) throw new DomainInvariantError('INVALID_JOB_ERROR', 'Preservation diagnostic must contain between 1 and 4000 characters');
+  await withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const job = await transaction.selectFrom('integration_jobs').select(['status', 'claim_token', 'job_type', 'aggregate_type', 'aggregate_id']).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).forUpdate().executeTakeFirst();
+    if (job?.status !== 'RUNNING' || job.claim_token !== input.claimToken || job.job_type !== archivePreservationJobType || job.aggregate_type !== archivePreservationAggregateType || job.aggregate_id !== input.transferId) throw new DomainInvariantError('INVALID_JOB_STATE', 'Archive preservation claim is invalid or expired');
+    await transaction.updateTable('integration_jobs').set({ last_error: input.diagnostic.slice(0, 4000), updated_at: await databaseTimestamp(transaction, 'Archive preservation diagnostic') }).where('institution_id', '=', input.institutionId).where('id', '=', input.jobId).where('claim_token', '=', input.claimToken).executeTakeFirstOrThrow();
   });
 }
 

@@ -38,6 +38,6 @@ describe('Fastify authentication seam', () => {
     const response = await app.inject({ method: 'GET', url: '/auth/me', headers: { authorization: `Bearer ${token}` } });
     await app.close();
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ userId: principal.userId, institutionId: principal.institutionId, issuer: principal.issuer, subject: principal.subject });
+    expect(response.json()).toEqual({ userId: principal.userId, institutionId: principal.institutionId, issuer: principal.issuer, subject: principal.subject, institutionCapabilities: [], unitCapabilities: {} });
   });
 });

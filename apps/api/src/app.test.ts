@@ -77,6 +77,6 @@ describe('GET /health', () => {
     app = await createApp({ authenticateAccessToken: authenticate, checkDatabase: () => Promise.resolve(true), version: 'test', webOrigin: 'http://localhost' });
     const response = await app.inject({ method: 'GET', url: '/auth/me', headers: { authorization: 'Bearer valid-token' } });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ userId: principal.userId, institutionId: principal.institutionId, issuer: principal.issuer, subject: principal.subject });
+    expect(response.json()).toEqual({ userId: principal.userId, institutionId: principal.institutionId, issuer: principal.issuer, subject: principal.subject, institutionCapabilities: [], unitCapabilities: {} });
   });
 });

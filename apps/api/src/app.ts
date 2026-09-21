@@ -1,7 +1,6 @@
 import cors from '@fastify/cors';
 import { HealthResponseSchema, type HealthResponse } from '@ici/contracts';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { AuthenticatedPrincipal } from './auth.js';
 import { installAuthentication, type AuthenticateRequest } from './auth-plugin.js';
 import { installMatterRoutes, type MatterApplicationService, MatterHttpError } from './matters.js';
 import { installDocumentRoutes, type DocumentApplicationDependencies, DocumentHttpError } from './documents.js';
@@ -55,7 +54,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
     },
   );
 
-  app.get<{ Reply: Pick<AuthenticatedPrincipal, 'userId' | 'institutionId' | 'issuer' | 'subject'> }>(
+  app.get<{ Reply: { readonly userId: string; readonly institutionId: string; readonly issuer: string; readonly subject: string; readonly institutionCapabilities: readonly string[]; readonly unitCapabilities: Readonly<Record<string, readonly string[]>> } }>(
     '/auth/me',
     { preHandler: (request, reply, done) => {
       void authenticateRequest(request, reply).then(() => { if (!reply.sent) done(); }).catch(done);
@@ -65,6 +64,8 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       institutionId: request.principal.institutionId,
       issuer: request.principal.issuer,
       subject: request.principal.subject,
+      institutionCapabilities: [...request.principal.authorization.institutionCapabilities],
+      unitCapabilities: Object.fromEntries([...request.principal.authorization.unitCapabilities.entries()].map(([unitId, capabilities]) => [unitId, [...capabilities]])),
     }),
   );
 

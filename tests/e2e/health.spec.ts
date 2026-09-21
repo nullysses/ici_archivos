@@ -7,6 +7,9 @@ test('renders the operational shell and API status', async ({ page }) => {
   await expect(page.getByText(/Disponible|Requiere atención/)).toBeVisible();
   await expect(page.getByRole('link', { name: 'Inicio' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Administración' })).toHaveCount(0);
+  const inicio = page.getByRole('link', { name: 'Inicio' });
+  await inicio.focus();
+  await expect(inicio).toBeFocused();
   await page.goto('/matters');
   await expect(page.getByRole('heading', { name: 'No tienes permisos para ver esta sección' })).toBeVisible();
   await page.goto('/ruta-inexistente');

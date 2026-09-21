@@ -17,7 +17,14 @@ boundary in `apps/web/src/api.ts`.
 Navigation is a presentation aid only. The backend remains authoritative for
 authorization. The `/auth/me` response exposes institution and unit-scoped
 capabilities so the shell can hide unavailable areas without inferring access
-from role labels.
+from role labels. Presentation checks are explicit: `canInstitution` is used
+for institution-wide actions, `canInUnit` requires the selected unit, and
+`canAnywhere` only answers whether a capability exists in either scope; a unit
+grant is never promoted to an institution grant.
+
+The health query accepts the API's intentional HTTP 503 degraded response so
+the shell can distinguish an available API with a down database from a network
+failure.
 
 Shared presentation conventions live in `apps/web/src/ux.tsx`: folios,
 lifecycle badges, loading, empty, error, forbidden, not-found, and

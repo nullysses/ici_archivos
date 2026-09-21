@@ -8,6 +8,6 @@ export default defineConfig({
       reporter: ['text', 'json', 'html'],
     },
     exclude: ['**/*.integration.test.ts', '**/node_modules/**', '**/dist/**'],
-    include: ['apps/**/*.test.ts', 'packages/**/*.test.ts'],
+    include: ['apps/**/*.test.ts', 'apps/**/*.test.tsx', 'packages/**/*.test.ts'],
   },
 });

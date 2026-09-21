@@ -10,6 +10,7 @@ import {
   MatterNoteRequestSchema,
   MatterNoteSchema,
   MatterNotesResponseSchema,
+  MatterActivityResponseSchema,
   MatterResolveRequestSchema,
   MatterRegistrationRequestSchema,
   MatterResponseSchema,
@@ -22,6 +23,7 @@ import {
   type MatterLinkExpedienteRequest,
   type MatterNoteRequest,
   type MatterNotesResponse,
+  type MatterActivityResponse,
   type MatterResolveRequest,
   type MatterRegistrationRequest,
   type MatterResponse,
@@ -38,6 +40,7 @@ import {
   findMatterById,
   findMatterInbox,
   findMatterNotesAuthorized,
+  findMatterActivityAuthorized,
   linkMatterToExpedienteAtomically,
   persistMatterTransition,
   type JsonObject,
@@ -46,6 +49,7 @@ import {
   type MatterReadModel,
   type MatterInboxReadModel,
   type MatterNoteReadModel,
+  type MatterActivityReadModel,
 } from '@ici/database';
 import type { AuthenticateRequest } from './auth-plugin.js';
 import type { AuthenticatedPrincipal } from './auth.js';
@@ -97,6 +101,7 @@ export interface MatterApplicationService {
     readonly matterId: string;
     readonly authorization: AuthenticatedPrincipal['authorization'];
   }): Promise<readonly MatterNoteReadModel[]>;
+  activity(input: { readonly institutionId: string; readonly matterId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<readonly MatterActivityReadModel[]>;
   addNote(input: {
     readonly id: string;
     readonly institutionId: string;
@@ -232,6 +237,15 @@ export function createMatterApplicationService(database: Database): MatterApplic
       matterId: input.matterId,
       authorizationContext: input.authorization,
     }),
+    async activity(input) {
+      const rows = await findMatterActivityAuthorized(database, {
+        institutionId: input.institutionId,
+        matterId: input.matterId,
+        authorizationContext: input.authorization,
+      });
+      if (rows === undefined) throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
+      return rows;
+    },
     async addNote(input) {
       return addMatterNoteAtomically(database, {
         id: input.id,
@@ -414,6 +428,21 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
       }
     },
   );
+  app.get<{ Params: { id: string }; Reply: MatterActivityResponse }>(
+    '/matters/:id/activity',
+    { preHandler, schema: { params: MatterIdParamsSchema, response: { 200: MatterActivityResponseSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema } } },
+    async (request) => {
+      try {
+        const activity = await service.activity({ institutionId: request.principal.institutionId, matterId: request.params.id, authorization: request.principal.authorization });
+        return { items: activity.map(toMatterActivity) };
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
+        if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
+        if (error instanceof MatterHttpError) throw error;
+        throw error;
+      }
+    },
+  );
   app.post<{ Params: { id: string }; Body: MatterNoteRequest; Reply: MatterNotesResponse['items'][number] }>(
     '/matters/:id/notes',
     { preHandler, schema: { params: MatterIdParamsSchema, body: MatterNoteRequestSchema, response: notesResponseSchemas } },
@@ -513,6 +542,10 @@ function toMatterNote(note: MatterNoteReadModel): MatterNotesResponse['items'][n
     content: note.content,
     createdAt: toIsoString(note.created_at),
   };
+}
+
+function toMatterActivity(event: MatterActivityReadModel): MatterActivityResponse['items'][number] {
+  return { id: event.id, kind: event.kind, eventType: event.event_type, ...(event.command === undefined ? {} : { command: event.command }), fromStatus: event.from_status, toStatus: event.to_status, actorUserId: event.actor_user_id, reason: event.reason, eventData: event.event_data, occurredAt: toIsoString(event.occurred_at) };
 }
 
 function toIsoString(value: Date | string): string {

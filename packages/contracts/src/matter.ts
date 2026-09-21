@@ -122,6 +122,22 @@ export type MatterNote = Static<typeof MatterNoteSchema>;
 export const MatterNotesResponseSchema = Type.Object({ items: Type.Array(MatterNoteSchema) }, { additionalProperties: false, $id: 'MatterNotesResponse' });
 export type MatterNotesResponse = Static<typeof MatterNotesResponseSchema>;
 
+export const MatterActivityEventSchema = Type.Object({
+  id: Uuid,
+  kind: Type.Union([Type.Literal('state'), Type.Literal('audit')]),
+  eventType: Type.String(),
+  command: Type.Optional(Type.String()),
+  fromStatus: Type.Union([Type.String(), Type.Null()]),
+  toStatus: Type.Union([Type.String(), Type.Null()]),
+  actorUserId: Type.Union([Uuid, Type.Null()]),
+  reason: Type.Union([Type.String(), Type.Null()]),
+  eventData: JsonObjectSchema,
+  occurredAt: DateTime,
+}, { additionalProperties: false, $id: 'MatterActivityEvent' });
+export type MatterActivityEvent = Static<typeof MatterActivityEventSchema>;
+export const MatterActivityResponseSchema = Type.Object({ items: Type.Array(MatterActivityEventSchema) }, { additionalProperties: false, $id: 'MatterActivityResponse' });
+export type MatterActivityResponse = Static<typeof MatterActivityResponseSchema>;
+
 export const MatterIdParamsSchema = Type.Object({ id: Uuid }, { additionalProperties: false, $id: 'MatterIdParams' });
 export type MatterIdParams = Static<typeof MatterIdParamsSchema>;
 

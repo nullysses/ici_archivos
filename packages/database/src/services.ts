@@ -426,12 +426,15 @@ export async function findPublishedExpedienteTypeVersions(database: Database, in
   });
 }
 
-export async function findActiveOrganizationalUnits(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly { readonly id: string; readonly code: string; readonly name: string }[]> {
+export type OrganizationalUnitLookupPurpose = 'assign' | 'register' | 'read';
+export async function findActiveOrganizationalUnits(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext; readonly purpose?: OrganizationalUnitLookupPurpose }): Promise<readonly { readonly id: string; readonly code: string; readonly name: string }[]> {
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
     if (input.authorizationContext.institutionId !== String(input.institutionId)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment units require the active institution');
-    const institutionWide = canPerform(input.authorizationContext, 'matter.assign');
-    const authorizedUnits = [...input.authorizationContext.unitCapabilities.entries()].filter(([, capabilities]) => capabilities.has('matter.assign')).map(([unitId]) => unitId);
-    if (!institutionWide && authorizedUnits.length === 0) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment units require matter.assign');
+    const purpose = input.purpose ?? 'assign';
+    const capability = purpose === 'register' ? 'matter.register' : purpose === 'read' ? 'records.read' : 'matter.assign';
+    const institutionWide = canPerform(input.authorizationContext, capability);
+    const authorizedUnits = [...input.authorizationContext.unitCapabilities.entries()].filter(([, capabilities]) => capabilities.has(capability)).map(([unitId]) => unitId);
+    if (!institutionWide && authorizedUnits.length === 0) throw new DomainInvariantError('NOT_AUTHORIZED', `Organizational unit lookup requires ${capability}`);
     let query = transaction.selectFrom('organizational_units').select(['id', 'code', 'name']).where('institution_id', '=', input.institutionId).where('status', '=', 'ACTIVE');
     if (!institutionWide) query = query.where('id', 'in', authorizedUnits);
     return query.orderBy('name').execute();
@@ -445,9 +448,12 @@ export async function findActiveUsersForUnit(database: Database, input: { readon
   });
 }
 
-export async function findAccessClassifications(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly { readonly id: string; readonly legal_classification: string; readonly operational_visibility: string }[]> {
+export type AccessClassificationLookupPurpose = 'matter' | 'document';
+export async function findAccessClassifications(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext; readonly purpose?: AccessClassificationLookupPurpose }): Promise<readonly { readonly id: string; readonly legal_classification: string; readonly operational_visibility: string }[]> {
   return withTenantTransaction(database, input.institutionId, async (transaction) => {
-    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'matter.register')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Access classifications require matter.register');
+    const purpose = input.purpose ?? 'matter';
+    const capability = purpose === 'document' ? 'expediente.edit_open' : 'matter.register';
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, capability)) throw new DomainInvariantError('NOT_AUTHORIZED', `Access classifications require ${capability}`);
     return transaction.selectFrom('access_classifications').select(['id', 'legal_classification', 'operational_visibility']).where('institution_id', '=', input.institutionId).orderBy('legal_classification').execute();
   });
 }
@@ -714,6 +720,32 @@ export async function findMatterNotesAuthorized(
       .orderBy('created_at')
       .orderBy('id')
       .execute();
+  });
+}
+
+export interface MatterActivityReadModel {
+  readonly id: string;
+  readonly kind: 'state' | 'audit';
+  readonly event_type: string;
+  readonly command?: string;
+  readonly from_status: string | null;
+  readonly to_status: string | null;
+  readonly actor_user_id: string | null;
+  readonly reason: string | null;
+  readonly event_data: JsonObject;
+  readonly occurred_at: Date | string;
+}
+
+export async function findMatterActivityAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly matterId: string; readonly authorizationContext: AuthorizationContext }): Promise<readonly MatterActivityReadModel[] | undefined> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    const matter = await transaction.selectFrom('matters').select(['id', 'destination_unit_id', 'intake_metadata']).where('institution_id', '=', input.institutionId).where('id', '=', input.matterId).forShare().executeTakeFirst();
+    if (matter === undefined) return undefined;
+    const visibility = matter.intake_metadata.operationalVisibility;
+    const unit = await effectiveMatterUnit(transaction, String(input.institutionId), input.matterId, matter.destination_unit_id);
+    if (visibility !== 'INSTITUTION' && visibility !== 'UNIT' || !canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read matter activity');
+    const states = await transaction.selectFrom('matter_state_events').selectAll().where('institution_id', '=', input.institutionId).where('matter_id', '=', input.matterId).execute();
+    const audits = await transaction.selectFrom('audit_events').selectAll().where('institution_id', '=', input.institutionId).where('aggregate_type', '=', 'matter').where('aggregate_id', '=', input.matterId).execute();
+    return [...states.map((event) => ({ id: event.id, kind: 'state' as const, event_type: event.command, command: event.command, from_status: event.from_status, to_status: event.to_status, actor_user_id: event.actor_user_id, reason: event.reason, event_data: event.event_data, occurred_at: event.occurred_at })), ...audits.map((event) => ({ id: event.id, kind: 'audit' as const, event_type: event.event_type, from_status: null, to_status: null, actor_user_id: event.actor_user_id, reason: null, event_data: event.event_data, occurred_at: event.occurred_at }))].sort((left, right) => new Date(left.occurred_at).getTime() - new Date(right.occurred_at).getTime());
   });
 }
 

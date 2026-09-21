@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { MatterInboxReadModel, MatterNoteReadModel, MatterReadModel } from '@ici/database';
+import type { MatterActivityReadModel, MatterInboxReadModel, MatterNoteReadModel, MatterReadModel } from '@ici/database';
 import { createApp } from './app.js';
 import type { AuthenticatedPrincipal } from './auth.js';
 import { MatterHttpError, type MatterApplicationService } from './matters.js';
@@ -37,6 +37,7 @@ function principal(authorization: AuthenticatedPrincipal['authorization']): Auth
 function serviceFixture(): MatterApplicationService {
   const inboxMatter: MatterInboxReadModel = { ...matter, assignment_unit_id: unitId, assignment_user_id: userId, assignment_assigned_at: matter.updated_at };
   const note: MatterNoteReadModel = { id: '10000000-0000-4000-8000-000000000006', institution_id: institutionId, matter_id: matterId, author_user_id: userId, note_type: 'NOTE', content: 'Note', created_at: matter.updated_at };
+  const activity: MatterActivityReadModel = { id: '10000000-0000-4000-8000-000000000007', kind: 'state', event_type: 'registerMatter', command: 'registerMatter', from_status: null, to_status: 'RECEIVED', actor_user_id: userId, reason: null, event_data: {}, occurred_at: matter.updated_at };
   return {
     register: () => Promise.resolve(matter),
     byId: (_institution, id) => Promise.resolve(id === matterId ? matter : undefined),
@@ -47,6 +48,7 @@ function serviceFixture(): MatterApplicationService {
     inbox: () => Promise.resolve([inboxMatter]),
     transition: () => Promise.resolve(matter),
     listNotes: () => Promise.resolve([]),
+    activity: () => Promise.resolve([activity]),
     addNote: () => Promise.resolve(note),
     linkExpediente: () => Promise.resolve(matter),
   };
@@ -187,6 +189,13 @@ describe('matter registration and read routes', () => {
     const response = await app.inject({ method: 'GET', url: `/matters/${matterId}/notes`, headers: { authorization: 'Bearer token' } });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ items: [{ id: note.id, matterId, authorUserId: userId, noteType: 'NOTE', content: 'Note', createdAt: note.created_at.toISOString() }] });
+  });
+
+  it('exposes the authoritative matter activity timeline', async () => {
+    app = await createTestApp();
+    const response = await app.inject({ method: 'GET', url: `/matters/${matterId}/activity`, headers: { authorization: 'Bearer token' } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ items: [{ id: '10000000-0000-4000-8000-000000000007', kind: 'state', eventType: 'registerMatter', command: 'registerMatter', fromStatus: null, toStatus: 'RECEIVED', actorUserId: userId, reason: null, eventData: {}, occurredAt: matter.updated_at.toISOString() }] });
   });
 
   it('exposes the one-time expediente linkage contract and server authorization inputs', async () => {

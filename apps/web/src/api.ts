@@ -86,6 +86,7 @@ export interface Matter {
   readonly assignmentUnitId?: string; readonly assignmentUserId?: string | null; readonly assignedAt?: string;
 }
 export interface MatterNote { readonly id: string; readonly matterId: string; readonly authorUserId: string; readonly noteType: 'NOTE' | 'RESPONSE'; readonly content: string; readonly createdAt: string; }
+export interface MatterActivity { readonly id: string; readonly kind: 'state' | 'audit'; readonly eventType: string; readonly command?: string; readonly fromStatus: string | null; readonly toStatus: string | null; readonly actorUserId: string | null; readonly reason: string | null; readonly eventData: Record<string, unknown>; readonly occurredAt: string; }
 export interface Expediente { readonly id: string; readonly folio: string; readonly status: string; readonly expedienteTypeVersionId: string; readonly metadata: Record<string, unknown>; readonly openedAt: string; readonly closedAt: string | null; }
 export interface PublishedExpedienteType { readonly id: string; readonly expedienteTypeId: string; readonly code: string; readonly name: string; readonly versionNumber: number; readonly schema: Record<string, unknown>; }
 export interface OrganizationalUnit { readonly id: string; readonly code: string; readonly name: string; }
@@ -97,13 +98,14 @@ export interface Document { readonly id: string; readonly matterId: string | nul
 export function fetchMatterInbox(): Promise<{ readonly items: readonly Matter[] }> { return apiRequest('/matters/inbox'); }
 export function fetchMatter(id: string): Promise<Matter> { return apiRequest(`/matters/${id}`); }
 export function fetchMatterNotes(id: string): Promise<{ readonly items: readonly MatterNote[] }> { return apiRequest(`/matters/${id}/notes`); }
+export function fetchMatterActivity(id: string): Promise<{ readonly items: readonly MatterActivity[] }> { return apiRequest(`/matters/${id}/activity`); }
 export function fetchExpedientes(): Promise<{ readonly items: readonly Expediente[] }> { return apiRequest('/expedientes'); }
 export function fetchExpediente(id: string): Promise<Expediente> { return apiRequest(`/expedientes/${id}`); }
 export function fetchExpedienteDocuments(id: string): Promise<{ readonly items: readonly Document[] }> { return apiRequest(`/expedientes/${id}/documents`); }
 export function fetchPublishedExpedienteTypes(): Promise<{ readonly items: readonly PublishedExpedienteType[] }> { return apiRequest('/expediente-types/published'); }
-export function fetchUnits(): Promise<{ readonly items: readonly OrganizationalUnit[] }> { return apiRequest('/lookups/organizational-units'); }
+export function fetchUnits(purpose: 'assign' | 'register' | 'read' = 'assign'): Promise<{ readonly items: readonly OrganizationalUnit[] }> { return apiRequest(`/lookups/organizational-units?purpose=${purpose}`); }
 export function fetchUnitUsers(unitId: string): Promise<{ readonly items: readonly AssignmentUser[] }> { return apiRequest(`/lookups/organizational-units/${unitId}/users`); }
-export function fetchAccessClassifications(): Promise<{ readonly items: readonly AccessClassification[] }> { return apiRequest('/lookups/access-classifications'); }
+export function fetchAccessClassifications(purpose: 'matter' | 'document' = 'matter'): Promise<{ readonly items: readonly AccessClassification[] }> { return apiRequest(`/lookups/access-classifications?purpose=${purpose}`); }
 
 export async function apiMutation<T>(path: string, body: unknown, method = 'POST'): Promise<T> {
   return apiRequest<T>(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

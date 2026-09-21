@@ -29,3 +29,12 @@ export const ExpedienteCloseRequestSchema = Type.Object({
   closureMetadata: JsonObject,
 }, { additionalProperties: false, $id: 'ExpedienteCloseRequest' });
 export type ExpedienteCloseRequest = Static<typeof ExpedienteCloseRequestSchema>;
+export const ExpedienteReopenRequestSchema = Type.Object({ reason: Type.String({ minLength: 1, maxLength: 4000 }) }, { additionalProperties: false, $id: 'ExpedienteReopenRequest' });
+export type ExpedienteReopenRequest = Static<typeof ExpedienteReopenRequestSchema>;
+
+export const ExpedienteListResponseSchema = Type.Object({ items: Type.Array(ExpedienteResponseSchema) }, { additionalProperties: false, $id: 'ExpedienteListResponse' });
+export type ExpedienteListResponse = Static<typeof ExpedienteListResponseSchema>;
+export const PublishedExpedienteTypeVersionSchema = Type.Object({ id: Uuid, expedienteTypeId: Uuid, code: Type.String(), name: Type.String(), versionNumber: Type.Integer({ minimum: 1 }), schema: JsonObject }, { additionalProperties: false, $id: 'PublishedExpedienteTypeVersion' });
+export type PublishedExpedienteTypeVersion = Static<typeof PublishedExpedienteTypeVersionSchema>;
+export const PublishedExpedienteTypeVersionsResponseSchema = Type.Object({ items: Type.Array(PublishedExpedienteTypeVersionSchema) }, { additionalProperties: false, $id: 'PublishedExpedienteTypeVersionsResponse' });
+export type PublishedExpedienteTypeVersionsResponse = Static<typeof PublishedExpedienteTypeVersionsResponseSchema>;

@@ -76,3 +76,47 @@ export function canAnywhere(session: Session | null | undefined, capability: Cap
 }
 
 export const can = canInstitution;
+
+export interface Matter {
+  readonly id: string; readonly folio: string; readonly status: string; readonly receivedAt: string; readonly dueAt?: string;
+  readonly sender: string; readonly subject: string; readonly description: string; readonly priority: string; readonly channel: string;
+  readonly destinationUnitId: string | null; readonly accessClassificationId: string | null; readonly operationalVisibility: string | null;
+  readonly resolutionMetadata: Record<string, unknown> | null; readonly closureMetadata: Record<string, unknown> | null;
+  readonly linkedExpedienteId: string | null; readonly createdBy: string | null; readonly createdAt: string; readonly updatedAt: string;
+  readonly assignmentUnitId?: string; readonly assignmentUserId?: string | null; readonly assignedAt?: string;
+}
+export interface MatterNote { readonly id: string; readonly matterId: string; readonly authorUserId: string; readonly noteType: 'NOTE' | 'RESPONSE'; readonly content: string; readonly createdAt: string; }
+export interface Expediente { readonly id: string; readonly folio: string; readonly status: string; readonly expedienteTypeVersionId: string; readonly metadata: Record<string, unknown>; readonly openedAt: string; readonly closedAt: string | null; }
+export interface PublishedExpedienteType { readonly id: string; readonly expedienteTypeId: string; readonly code: string; readonly name: string; readonly versionNumber: number; readonly schema: Record<string, unknown>; }
+export interface OrganizationalUnit { readonly id: string; readonly code: string; readonly name: string; }
+export interface AssignmentUser { readonly id: string; readonly displayName: string; }
+export interface AccessClassification { readonly id: string; readonly legalClassification: string; readonly operationalVisibility: string; }
+export interface DocumentVersion { readonly id: string; readonly documentId: string; readonly versionNumber: number; readonly originalFilename: string; readonly detectedMimeType: string; readonly declaredMimeType: string | null; readonly sizeBytes: string; readonly sha256: string; readonly malwareScanStatus: 'PENDING_SCAN' | 'CLEAN' | 'INFECTED' | 'SCAN_FAILED' | 'QUARANTINED'; readonly createdBy: string; readonly createdAt: string; readonly replacementReason: string | null; }
+export interface Document { readonly id: string; readonly matterId: string | null; readonly expedienteId: string | null; readonly documentType: string; readonly title: string; readonly currentVersionId: string | null; readonly accessClassificationId: string | null; readonly createdAt: string; readonly updatedAt: string; readonly versions: readonly DocumentVersion[]; }
+
+export function fetchMatterInbox(): Promise<{ readonly items: readonly Matter[] }> { return apiRequest('/matters/inbox'); }
+export function fetchMatter(id: string): Promise<Matter> { return apiRequest(`/matters/${id}`); }
+export function fetchMatterNotes(id: string): Promise<{ readonly items: readonly MatterNote[] }> { return apiRequest(`/matters/${id}/notes`); }
+export function fetchExpedientes(): Promise<{ readonly items: readonly Expediente[] }> { return apiRequest('/expedientes'); }
+export function fetchExpediente(id: string): Promise<Expediente> { return apiRequest(`/expedientes/${id}`); }
+export function fetchExpedienteDocuments(id: string): Promise<{ readonly items: readonly Document[] }> { return apiRequest(`/expedientes/${id}/documents`); }
+export function fetchPublishedExpedienteTypes(): Promise<{ readonly items: readonly PublishedExpedienteType[] }> { return apiRequest('/expediente-types/published'); }
+export function fetchUnits(): Promise<{ readonly items: readonly OrganizationalUnit[] }> { return apiRequest('/lookups/organizational-units'); }
+export function fetchUnitUsers(unitId: string): Promise<{ readonly items: readonly AssignmentUser[] }> { return apiRequest(`/lookups/organizational-units/${unitId}/users`); }
+export function fetchAccessClassifications(): Promise<{ readonly items: readonly AccessClassification[] }> { return apiRequest('/lookups/access-classifications'); }
+
+export async function apiMutation<T>(path: string, body: unknown, method = 'POST'): Promise<T> {
+  return apiRequest<T>(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+export async function uploadDocument(path: string, fields: Record<string, string>, file: File): Promise<{ readonly document: Document; readonly version: DocumentVersion }> {
+  const form = new FormData();
+  Object.entries(fields).forEach(([key, value]) => form.append(key, value));
+  form.append('file', file);
+  const headers = new Headers({ Accept: 'application/json' });
+  if (accessToken !== undefined) headers.set('Authorization', `Bearer ${accessToken}`);
+  const response = await fetch(`/api${path}`, { method: 'POST', headers, body: form });
+  const body = (await response.json().catch(() => undefined)) as { readonly error?: { readonly message?: string } } | { readonly document: Document; readonly version: DocumentVersion } | undefined;
+  if (!response.ok) throw new ApiError(response.status, typeof body === 'object' && body !== null && 'error' in body && body.error?.message !== undefined ? body.error.message : 'No se pudo cargar el documento');
+  return body as { readonly document: Document; readonly version: DocumentVersion };
+}

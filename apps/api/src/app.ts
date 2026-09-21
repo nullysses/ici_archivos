@@ -6,6 +6,8 @@ import { installMatterRoutes, type MatterApplicationService, MatterHttpError } f
 import { installDocumentRoutes, type DocumentApplicationDependencies, DocumentHttpError } from './documents.js';
 import { installExpedienteRoutes, type ExpedienteApplicationService, ExpedienteHttpError } from './expedientes.js';
 import { installArchiveTransferRoutes, type ArchiveTransferApplicationService, TransferHttpError } from './transfers.js';
+import { installLookupRoutes } from './lookups.js';
+import type { Database } from '@ici/database';
 
 export interface AppDependencies {
   readonly authenticateAccessToken: AuthenticateRequest;
@@ -16,6 +18,7 @@ export interface AppDependencies {
   readonly documentDependencies?: Omit<DocumentApplicationDependencies, 'authenticate'>;
   readonly expedienteService?: ExpedienteApplicationService;
   readonly archiveTransferService?: ArchiveTransferApplicationService;
+  readonly database?: Database;
 }
 
 export async function createApp(dependencies: AppDependencies): Promise<FastifyInstance> {
@@ -72,6 +75,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   if (dependencies.matterService !== undefined) installMatterRoutes(app, dependencies.matterService, dependencies.authenticateAccessToken);
   if (dependencies.expedienteService !== undefined) installExpedienteRoutes(app, dependencies.expedienteService, dependencies.authenticateAccessToken);
   if (dependencies.archiveTransferService !== undefined) installArchiveTransferRoutes(app, dependencies.archiveTransferService, dependencies.authenticateAccessToken);
+  if (dependencies.database !== undefined) installLookupRoutes(app, dependencies.database, dependencies.authenticateAccessToken);
   if (dependencies.documentDependencies !== undefined) await installDocumentRoutes(app, { ...dependencies.documentDependencies, authenticate: dependencies.authenticateAccessToken });
 
   return app;

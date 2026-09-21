@@ -4,7 +4,7 @@ import type { Selectable } from 'kysely';
 import type { AuthorizationContext, Capability, ExpedienteMetadataValidator, JsonObject, JsonValue, MatterState, ExpedienteState, InstitutionId } from '@ici/domain';
 import { canPerform, DomainInvariantError } from '@ici/domain';
 import type { Database, DatabaseTransaction } from './index.js';
-import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, ArchivematicaTransfersTable, DocumentsTable, DocumentVersionsTable, PreservationStagingRecordsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable } from './schema.js';
+import type { ArchiveTransfersTable, ArchivalClassificationNodesTable, AtomMappingsTable, ArchivematicaTransfersTable, DocumentsTable, DocumentVersionsTable, PreservationStagingRecordsTable, ExpedientesTable, IntegrationJobsTable, MatterNotesTable, MattersTable, TransferManifestsTable, ExpedienteTypeVersionsTable } from './schema.js';
 import { allocateFolio, appendAuditEvent, withAuditedTenantTransaction, withTenantContextTransaction, withTenantTransaction } from './index.js';
 
 const matterTransitions: Readonly<Record<string, { readonly from: readonly string[]; readonly to: string }>> = {
@@ -143,7 +143,7 @@ export async function registerMatterAtomically(database: Database, input: Regist
   });
 }
 
-export type MatterReadModel = Selectable<MattersTable> & { readonly effective_unit_id?: string | null };
+export type MatterReadModel = Selectable<MattersTable> & { readonly effective_unit_id?: string | null; readonly assignment_unit_id?: string | null; readonly assignment_user_id?: string | null; readonly assignment_assigned_at?: Date | string | null };
 
 async function currentMatterAssignment(transaction: DatabaseTransaction, institutionId: string, matterId: string): Promise<{ readonly unit_id: string; readonly user_id: string | null } | undefined> {
   return transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id']).where('institution_id', '=', institutionId).where('matter_id', '=', matterId).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
@@ -323,7 +323,8 @@ export async function findMatterById(database: Database, institutionId: Institut
   return withTenantTransaction(database, institutionId, async (transaction) => {
     const matter = await transaction.selectFrom('matters').selectAll().where('institution_id', '=', institutionId).where('id', '=', matterId).executeTakeFirst();
     if (matter === undefined) return undefined;
-    return { ...matter, effective_unit_id: await effectiveMatterUnit(transaction, String(institutionId), matterId, matter.destination_unit_id) };
+    const assignment = await transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id', 'assigned_at']).where('institution_id', '=', institutionId).where('matter_id', '=', matterId).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
+    return { ...matter, effective_unit_id: await effectiveMatterUnit(transaction, String(institutionId), matterId, matter.destination_unit_id), assignment_unit_id: assignment?.unit_id ?? null, assignment_user_id: assignment?.user_id ?? null, assignment_assigned_at: assignment?.assigned_at ?? null };
   });
 }
 
@@ -331,7 +332,8 @@ export async function findMatterByFolio(database: Database, institutionId: Insti
   return withTenantTransaction(database, institutionId, async (transaction) => {
     const matter = await transaction.selectFrom('matters').selectAll().where('institution_id', '=', institutionId).where('folio', '=', folio).executeTakeFirst();
     if (matter === undefined) return undefined;
-    return { ...matter, effective_unit_id: await effectiveMatterUnit(transaction, String(institutionId), matter.id, matter.destination_unit_id) };
+    const assignment = await transaction.selectFrom('matter_assignments').select(['unit_id', 'user_id', 'assigned_at']).where('institution_id', '=', institutionId).where('matter_id', '=', matter.id).orderBy('assigned_at', 'desc').orderBy('id', 'desc').executeTakeFirst();
+    return { ...matter, effective_unit_id: await effectiveMatterUnit(transaction, String(institutionId), matter.id, matter.destination_unit_id), assignment_unit_id: assignment?.unit_id ?? null, assignment_user_id: assignment?.user_id ?? null, assignment_assigned_at: assignment?.assigned_at ?? null };
   });
 }
 
@@ -407,6 +409,47 @@ export async function findExpedienteById(database: Database, institutionId: Inst
     .where('institution_id', '=', institutionId)
     .where('id', '=', expedienteId)
     .executeTakeFirst());
+}
+
+export async function findExpedientesAuthorized(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly ExpedienteReadModel[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'records.read')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente list requires institution-scoped records.read');
+    return transaction.selectFrom('expedientes').selectAll().where('institution_id', '=', input.institutionId).orderBy('opened_at', 'desc').orderBy('id').execute();
+  });
+}
+
+export type PublishedExpedienteTypeVersionReadModel = Pick<Selectable<ExpedienteTypeVersionsTable>, 'id' | 'expediente_type_id' | 'version_number' | 'schema_json'> & { readonly code: string; readonly name: string };
+export async function findPublishedExpedienteTypeVersions(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly PublishedExpedienteTypeVersionReadModel[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'expediente.create')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Expediente types require expediente.create');
+    return transaction.selectFrom('expediente_type_versions as v').innerJoin('expediente_types as t', (join) => join.onRef('t.id', '=', 'v.expediente_type_id').onRef('t.institution_id', '=', 'v.institution_id')).select(['v.id', 'v.expediente_type_id', 'v.version_number', 'v.schema_json', 't.code', 't.name']).where('v.institution_id', '=', input.institutionId).where('v.status', '=', 'PUBLISHED').where('t.status', '=', 'ACTIVE').orderBy('t.name').orderBy('v.version_number', 'desc').execute();
+  });
+}
+
+export async function findActiveOrganizationalUnits(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly { readonly id: string; readonly code: string; readonly name: string }[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment units require the active institution');
+    const institutionWide = canPerform(input.authorizationContext, 'matter.assign');
+    const authorizedUnits = [...input.authorizationContext.unitCapabilities.entries()].filter(([, capabilities]) => capabilities.has('matter.assign')).map(([unitId]) => unitId);
+    if (!institutionWide && authorizedUnits.length === 0) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment units require matter.assign');
+    let query = transaction.selectFrom('organizational_units').select(['id', 'code', 'name']).where('institution_id', '=', input.institutionId).where('status', '=', 'ACTIVE');
+    if (!institutionWide) query = query.where('id', 'in', authorizedUnits);
+    return query.orderBy('name').execute();
+  });
+}
+
+export async function findActiveUsersForUnit(database: Database, input: { readonly institutionId: InstitutionId | string; readonly unitId: string; readonly authorizationContext: AuthorizationContext }): Promise<readonly { readonly id: string; readonly display_name: string }[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'matter.assign', input.unitId)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Assignment users require matter.assign for the selected unit');
+    return transaction.selectFrom('users as u').innerJoin('user_role_assignments as a', (join) => join.onRef('a.user_id', '=', 'u.id').onRef('a.institution_id', '=', 'u.institution_id')).select(['u.id', 'u.display_name']).where('u.institution_id', '=', input.institutionId).where('u.status', '=', 'ACTIVE').where('a.unit_id', '=', input.unitId).where('a.effective_from', '<=', new Date()).where((eb) => eb.or([eb('a.effective_until', 'is', null), eb('a.effective_until', '>', new Date())])).distinct().orderBy('u.display_name').execute();
+  });
+}
+
+export async function findAccessClassifications(database: Database, input: { readonly institutionId: InstitutionId | string; readonly authorizationContext: AuthorizationContext }): Promise<readonly { readonly id: string; readonly legal_classification: string; readonly operational_visibility: string }[]> {
+  return withTenantTransaction(database, input.institutionId, async (transaction) => {
+    if (input.authorizationContext.institutionId !== String(input.institutionId) || !canPerform(input.authorizationContext, 'matter.register')) throw new DomainInvariantError('NOT_AUTHORIZED', 'Access classifications require matter.register');
+    return transaction.selectFrom('access_classifications').select(['id', 'legal_classification', 'operational_visibility']).where('institution_id', '=', input.institutionId).orderBy('legal_classification').execute();
+  });
 }
 
 export interface StateTransitionPersistenceInput {

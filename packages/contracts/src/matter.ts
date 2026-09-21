@@ -98,6 +98,10 @@ export type MatterResolveRequest = Static<typeof MatterResolveRequestSchema>;
 
 export const MatterVoidRequestSchema = Type.Object({ reason: NonBlank(4000) }, { additionalProperties: false, $id: 'MatterVoidRequest' });
 export type MatterVoidRequest = Static<typeof MatterVoidRequestSchema>;
+export const MatterCloseRequestSchema = Type.Object({ closureMetadata: JsonObjectSchema }, { additionalProperties: false, $id: 'MatterCloseRequest' });
+export type MatterCloseRequest = Static<typeof MatterCloseRequestSchema>;
+export const MatterReopenRequestSchema = Type.Object({ reason: NonBlank(4000) }, { additionalProperties: false, $id: 'MatterReopenRequest' });
+export type MatterReopenRequest = Static<typeof MatterReopenRequestSchema>;
 
 export const MatterNoteRequestSchema = Type.Object({
   noteType: Type.Optional(Type.Union([Type.Literal('NOTE'), Type.Literal('RESPONSE')])),
@@ -130,3 +134,16 @@ export const MatterErrorSchema = Type.Object({
     message: Type.String(),
   }),
 }, { additionalProperties: false, $id: 'MatterError' });
+
+export const OrganizationalUnitSchema = Type.Object({ id: Uuid, code: Type.String(), name: Type.String() }, { additionalProperties: false, $id: 'OrganizationalUnit' });
+export type OrganizationalUnit = Static<typeof OrganizationalUnitSchema>;
+export const OrganizationalUnitsResponseSchema = Type.Object({ items: Type.Array(OrganizationalUnitSchema) }, { additionalProperties: false, $id: 'OrganizationalUnitsResponse' });
+export type OrganizationalUnitsResponse = Static<typeof OrganizationalUnitsResponseSchema>;
+export const AssignmentUserSchema = Type.Object({ id: Uuid, displayName: Type.String() }, { additionalProperties: false, $id: 'AssignmentUser' });
+export type AssignmentUser = Static<typeof AssignmentUserSchema>;
+export const AssignmentUsersResponseSchema = Type.Object({ items: Type.Array(AssignmentUserSchema) }, { additionalProperties: false, $id: 'AssignmentUsersResponse' });
+export type AssignmentUsersResponse = Static<typeof AssignmentUsersResponseSchema>;
+export const AccessClassificationSchema = Type.Object({ id: Uuid, legalClassification: Type.String(), operationalVisibility: Type.String() }, { additionalProperties: false, $id: 'AccessClassification' });
+export type AccessClassification = Static<typeof AccessClassificationSchema>;
+export const AccessClassificationsResponseSchema = Type.Object({ items: Type.Array(AccessClassificationSchema) }, { additionalProperties: false, $id: 'AccessClassificationsResponse' });
+export type AccessClassificationsResponse = Static<typeof AccessClassificationsResponseSchema>;

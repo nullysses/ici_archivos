@@ -23,6 +23,7 @@ const app = await createApp({
   matterService: createMatterApplicationService(database),
   expedienteService: createExpedienteApplicationService(database),
   archiveTransferService: createArchiveTransferApplicationService(database),
+  database,
   checkDatabase: () => checkDatabase(database),
   version: process.env.npm_package_version ?? '0.0.0',
   webOrigin: config.webOrigin,

@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createBrowserRouter, Navigate, RouterProvider } from 'react-router';
-import { AdminRoute, App, ArchiveRoute, ExpedientesRoute, MattersRoute, RouteError, WorkRoute } from './App.js';
+import { AdminRoute, App, ArchiveRoute, RouteError, WorkRoute } from './App.js';
+import { ExpedienteDetailPage, ExpedientesPage, MatterDetailPage, MattersPage } from './operational.js';
 import { NotFoundState } from './ux.js';
 
 const queryClient = new QueryClient();
@@ -27,10 +28,10 @@ const router = createBrowserRouter([{
   children: [
     { index: true, element: <Navigate replace to="/work" /> },
     { path: 'work', element: <WorkRoute /> },
-    { path: 'matters', element: <MattersRoute /> },
-    { path: 'matters/:matterId', element: <NotFoundState /> },
-    { path: 'expedientes', element: <ExpedientesRoute /> },
-    { path: 'expedientes/:expedienteId', element: <NotFoundState /> },
+    { path: 'matters', element: <MattersPage /> },
+    { path: 'matters/:matterId', element: <MatterDetailPage /> },
+    { path: 'expedientes', element: <ExpedientesPage /> },
+    { path: 'expedientes/:expedienteId', element: <ExpedienteDetailPage /> },
     { path: 'archive', element: <ArchiveRoute /> },
     { path: 'archive/transfers/:transferId', element: <NotFoundState /> },
     { path: 'admin/units', element: <AdminRoute capability="identity.manage" description="La administración de unidades estará disponible en el siguiente ciclo." title="Unidades" /> },

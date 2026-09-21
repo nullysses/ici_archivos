@@ -30,3 +30,11 @@ Shared presentation conventions live in `apps/web/src/ux.tsx`: folios,
 lifecycle badges, loading, empty, error, forbidden, not-found, and
 confirmation states. Status uses text and a marker, never color alone. MUI
 focus-visible styles provide the keyboard focus baseline.
+
+Milestone 13 operational routes live in `apps/web/src/operational.tsx`:
+`/matters` is the capability-filtered inbox and `/matters/:matterId` is the
+workspace for assignment, notes, linkage, and lifecycle commands. The
+`/expedientes` surfaces create/list/detail workspaces and document upload and
+immutable-version presentation. Lookup endpoints are deliberately narrow and
+tenant-scoped; unit-scoped assignment is filtered to the exact authorized
+units. Archive transfer and preservation controls remain outside this UX.

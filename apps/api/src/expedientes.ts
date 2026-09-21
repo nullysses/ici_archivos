@@ -10,6 +10,12 @@ import {
   type ExpedienteIdParams,
   type ExpedienteResponse,
   type ExpedienteCloseRequest,
+  ExpedienteReopenRequestSchema,
+  type ExpedienteReopenRequest,
+  ExpedienteListResponseSchema,
+  PublishedExpedienteTypeVersionsResponseSchema,
+  type ExpedienteListResponse,
+  type PublishedExpedienteTypeVersionsResponse,
 } from '@ici/contracts';
 import {
   canPerform,
@@ -20,6 +26,8 @@ import {
   type JsonObject,
   createExpedienteSchemaValidator,
   persistExpedienteTransition,
+  findExpedientesAuthorized,
+  findPublishedExpedienteTypeVersions,
 } from '@ici/database';
 import type { AuthenticateRequest } from './auth-plugin.js';
 import { createAuthenticationGuard } from './auth-plugin.js';
@@ -46,6 +54,9 @@ export interface ExpedienteApplicationService {
   }): Promise<ExpedienteReadModel>;
   byId(institutionId: string, id: string): Promise<ExpedienteReadModel | undefined>;
   close(input: { readonly id: string; readonly institutionId: string; readonly actorUserId: string; readonly correlationId: string; readonly request: ExpedienteCloseRequest; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ExpedienteReadModel>;
+  reopen(input: { readonly id: string; readonly institutionId: string; readonly actorUserId: string; readonly correlationId: string; readonly request: ExpedienteReopenRequest; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<ExpedienteReadModel>;
+  list(input: { readonly institutionId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<readonly ExpedienteReadModel[]>;
+  publishedTypes(input: { readonly institutionId: string; readonly authorization: AuthenticatedPrincipal['authorization'] }): Promise<readonly { readonly id: string; readonly expediente_type_id: string; readonly version_number: number; readonly schema_json: Record<string, unknown>; readonly code: string; readonly name: string }[]>;
 }
 
 export function createExpedienteApplicationService(database: Database): ExpedienteApplicationService {
@@ -65,6 +76,8 @@ export function createExpedienteApplicationService(database: Database): Expedien
       return expediente;
     },
     byId: (institutionId, id) => findExpedienteById(database, institutionId, id),
+    list: (input) => findExpedientesAuthorized(database, { institutionId: input.institutionId, authorizationContext: input.authorization }),
+    publishedTypes: (input) => findPublishedExpedienteTypeVersions(database, { institutionId: input.institutionId, authorizationContext: input.authorization }),
     async close(input) {
       if (Object.keys(input.request.closureMetadata).length === 0) throw Object.assign(new Error('Closure metadata is required'), { code: 'INVALID_METADATA' });
       await persistExpedienteTransition(database, {
@@ -80,6 +93,12 @@ export function createExpedienteApplicationService(database: Database): Expedien
       });
       const expediente = await findExpedienteById(database, input.institutionId, input.id);
       if (expediente === undefined) throw new Error('Expediente closure did not produce an expediente');
+      return expediente;
+    },
+    async reopen(input) {
+      await persistExpedienteTransition(database, { institutionId: input.institutionId, aggregateId: input.id, actorUserId: input.actorUserId, correlationId: input.correlationId, command: 'reopenExpediente', fromStatus: 'CLOSED', toStatus: 'OPEN', reason: input.request.reason, authorizationContext: input.authorization });
+      const expediente = await findExpedienteById(database, input.institutionId, input.id);
+      if (expediente === undefined) throw new Error('Expediente reopen did not produce an expediente');
       return expediente;
     },
   };
@@ -129,6 +148,20 @@ export function installExpedienteRoutes(app: FastifyInstance, service: Expedient
     },
   );
 
+  app.get<{ Reply: ExpedienteListResponse }>('/expedientes', { preHandler, schema: { response: { 200: ExpedienteListResponseSchema, ...errors } } }, async (request, reply) => {
+    try { return reply.code(200).send({ items: (await service.list({ institutionId: request.principal.institutionId, authorization: request.principal.authorization })).map(toExpedienteResponse) }); }
+    catch (error) { throw mapExpedienteError(error); }
+  });
+
+  app.get<{ Reply: PublishedExpedienteTypeVersionsResponse }>(
+    '/expediente-types/published',
+    { preHandler, schema: { response: { 200: PublishedExpedienteTypeVersionsResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try { return reply.code(200).send({ items: (await service.publishedTypes({ institutionId: request.principal.institutionId, authorization: request.principal.authorization })).map(toPublishedType) }); }
+      catch (error) { throw mapExpedienteError(error); }
+    },
+  );
+
   app.post<{ Params: ExpedienteIdParams; Body: ExpedienteCloseRequest; Reply: ExpedienteResponse }>(
     '/expedientes/:expedienteId/close',
     { preHandler, schema: { params: ExpedienteIdParamsSchema, body: ExpedienteCloseRequestSchema, response: { 200: ExpedienteResponseSchema, ...errors } } },
@@ -140,6 +173,14 @@ export function installExpedienteRoutes(app: FastifyInstance, service: Expedient
       } catch (error) {
         throw mapExpedienteError(error);
       }
+    },
+  );
+  app.post<{ Params: ExpedienteIdParams; Body: ExpedienteReopenRequest; Reply: ExpedienteResponse }>(
+    '/expedientes/:expedienteId/reopen',
+    { preHandler, schema: { params: ExpedienteIdParamsSchema, body: ExpedienteReopenRequestSchema, response: { 200: ExpedienteResponseSchema, ...errors } } },
+    async (request, reply) => {
+      try { const reopened = await service.reopen({ id: request.params.expedienteId, institutionId: request.principal.institutionId, actorUserId: request.principal.userId, correlationId: request.id, request: request.body, authorization: request.principal.authorization }); return reply.code(200).send(toExpedienteResponse(reopened)); }
+      catch (error) { throw mapExpedienteError(error); }
     },
   );
 }
@@ -157,7 +198,7 @@ function mapExpedienteError(error: unknown): ExpedienteHttpError {
     return new ExpedienteHttpError(400, 'INVALID_REQUEST', 'Expediente request is invalid');
   }
   if (code === 'NOT_AUTHORIZED') return new ExpedienteHttpError(403, 'FORBIDDEN', 'Access denied');
-  if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION' || code === 'MATTERS_NOT_CLOSED' || code === 'DOCUMENTS_NOT_CLEAN') return new ExpedienteHttpError(409, 'INVALID_TRANSITION', 'Expediente cannot be closed in its current state');
+  if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION' || code === 'MATTERS_NOT_CLOSED' || code === 'DOCUMENTS_NOT_CLEAN' || code === 'TRANSFER_ALREADY_APPROVED') return new ExpedienteHttpError(409, 'INVALID_TRANSITION', code === 'DOCUMENTS_NOT_CLEAN' ? 'Expediente has documents pending malware analysis' : 'Expediente cannot change state in its current lifecycle');
   if (code === 'EXPEDIENTE_NOT_FOUND' || (error instanceof Error && error.message === 'Expediente not found')) return new ExpedienteHttpError(404, 'EXPEDIENTE_NOT_FOUND', 'Expediente not found');
   throw error;
 }
@@ -172,4 +213,8 @@ function toExpedienteResponse(expediente: ExpedienteReadModel): ExpedienteRespon
     openedAt: new Date(expediente.opened_at).toISOString(),
     closedAt: expediente.closed_at === null ? null : new Date(expediente.closed_at).toISOString(),
   };
+}
+
+function toPublishedType(version: { id: string; expediente_type_id: string; version_number: number; schema_json: Record<string, unknown>; code: string; name: string }): { id: string; expedienteTypeId: string; code: string; name: string; versionNumber: number; schema: Record<string, unknown> } {
+  return { id: version.id, expedienteTypeId: version.expediente_type_id, code: version.code, name: version.name, versionNumber: version.version_number, schema: version.schema_json };
 }

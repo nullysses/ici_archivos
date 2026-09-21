@@ -15,6 +15,8 @@ import {
   MatterResponseSchema,
   MatterStartRequestSchema,
   MatterVoidRequestSchema,
+  MatterCloseRequestSchema,
+  MatterReopenRequestSchema,
   type MatterAssignmentRequest,
   type MatterInboxResponse,
   type MatterLinkExpedienteRequest,
@@ -25,6 +27,8 @@ import {
   type MatterResponse,
   type MatterStartRequest,
   type MatterVoidRequest,
+  type MatterCloseRequest,
+  type MatterReopenRequest,
 } from '@ici/contracts';
 import {
   addMatterNoteAtomically,
@@ -83,7 +87,7 @@ export interface MatterApplicationService {
     readonly actorUserId: string;
     readonly correlationId: string;
     readonly matterId: string;
-    readonly command: 'startMatter' | 'resolveMatter' | 'voidMatter';
+    readonly command: 'startMatter' | 'resolveMatter' | 'voidMatter' | 'closeMatter' | 'reopenMatter';
     readonly authorization: AuthenticatedPrincipal['authorization'];
     readonly eventData?: JsonObject;
     readonly reason?: string;
@@ -198,7 +202,7 @@ export function createMatterApplicationService(database: Database): MatterApplic
     async transition(input) {
       const current = await findMatterById(database, input.institutionId, input.matterId);
       if (current === undefined) throw new MatterHttpError(404, 'MATTER_NOT_FOUND', 'Matter not found');
-      const target = input.command === 'startMatter' ? 'IN_PROGRESS' : input.command === 'resolveMatter' ? 'RESOLVED' : 'VOIDED';
+      const target = input.command === 'startMatter' ? 'IN_PROGRESS' : input.command === 'resolveMatter' ? 'RESOLVED' : input.command === 'closeMatter' ? 'CLOSED' : input.command === 'reopenMatter' ? 'IN_PROGRESS' : 'VOIDED';
       try {
         await persistMatterTransition(database, {
           institutionId: input.institutionId,
@@ -216,7 +220,7 @@ export function createMatterApplicationService(database: Database): MatterApplic
         const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
         if (code === 'NOT_AUTHORIZED' || code === 'AUTHORIZATION_CONTEXT_REQUIRED') throw new MatterHttpError(403, 'FORBIDDEN', 'Access denied');
         if (code === 'STALE_STATE' || code === 'INVALID_TRANSITION') throw new MatterHttpError(400, 'INVALID_TRANSITION', 'Matter state changed; retry the command');
-        if (code === 'INVALID_RESOLUTION' || code === 'REASON_REQUIRED') throw new MatterHttpError(400, 'INVALID_REQUEST', 'Transition metadata is invalid');
+        if (code === 'INVALID_RESOLUTION' || code === 'REASON_REQUIRED' || code === 'EXPEDIENTE_LINK_REQUIRED') throw new MatterHttpError(400, 'INVALID_REQUEST', code === 'EXPEDIENTE_LINK_REQUIRED' ? 'Matter must be linked to an expediente before closing' : 'Transition metadata is invalid');
         throw error;
       }
       const updated = await findMatterById(database, input.institutionId, input.matterId);
@@ -324,9 +328,9 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     async (request) => ({ items: (await service.inbox({ institutionId: request.principal.institutionId, userId: request.principal.userId, authorization: request.principal.authorization })).map(toMatterInboxItem) }),
   );
 
-  const transition = (command: 'startMatter' | 'resolveMatter' | 'voidMatter') => async (request: FastifyRequest<{ Params: { id: string }; Body: MatterStartRequest | MatterResolveRequest | MatterVoidRequest }>, reply: FastifyReply): Promise<MatterResponse> => {
+  const transition = (command: 'startMatter' | 'resolveMatter' | 'voidMatter' | 'closeMatter' | 'reopenMatter') => async (request: FastifyRequest<{ Params: { id: string }; Body: MatterStartRequest | MatterResolveRequest | MatterVoidRequest | MatterCloseRequest | MatterReopenRequest }>, reply: FastifyReply): Promise<MatterResponse> => {
     const body = request.body;
-    const eventData = command === 'resolveMatter' ? { resolutionMetadata: (body as MatterResolveRequest).resolutionMetadata as unknown as JsonObject } : undefined;
+    const eventData = command === 'resolveMatter' ? { resolutionMetadata: (body as MatterResolveRequest).resolutionMetadata as unknown as JsonObject } : command === 'closeMatter' ? { closureMetadata: (body as MatterCloseRequest).closureMetadata as unknown as JsonObject } : undefined;
     const matter = await service.transition({
       institutionId: request.principal.institutionId,
       actorUserId: request.principal.userId,
@@ -335,7 +339,7 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
       command,
       authorization: request.principal.authorization,
       ...(eventData === undefined ? {} : { eventData }),
-      ...(command === 'voidMatter' ? { reason: (body as MatterVoidRequest).reason } : {}),
+      ...(command === 'voidMatter' || command === 'reopenMatter' ? { reason: (body as MatterVoidRequest | MatterReopenRequest).reason } : {}),
     });
     reply.code(200);
     return toMatterResponse(matter);
@@ -355,6 +359,16 @@ export function installMatterRoutes(app: FastifyInstance, service: MatterApplica
     '/matters/:id/void',
     { preHandler, schema: { params: MatterIdParamsSchema, body: MatterVoidRequestSchema, response: transitionResponseSchemas } },
     transition('voidMatter'),
+  );
+  app.post<{ Params: { id: string }; Body: MatterCloseRequest; Reply: MatterResponse }>(
+    '/matters/:id/close',
+    { preHandler, schema: { params: MatterIdParamsSchema, body: MatterCloseRequestSchema, response: transitionResponseSchemas } },
+    transition('closeMatter'),
+  );
+  app.post<{ Params: { id: string }; Body: MatterReopenRequest; Reply: MatterResponse }>(
+    '/matters/:id/reopen',
+    { preHandler, schema: { params: MatterIdParamsSchema, body: MatterReopenRequestSchema, response: transitionResponseSchemas } },
+    transition('reopenMatter'),
   );
 
   app.post<{ Params: { id: string }; Body: MatterLinkExpedienteRequest; Reply: MatterResponse }>(

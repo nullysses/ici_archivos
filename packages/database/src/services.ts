@@ -39,6 +39,8 @@ const matterAuditEvents: Readonly<Record<string, string>> = {
   voidMatter: 'matter.voided',
 };
 
+const matterLifecycleAuditEvents = new Set(Object.values(matterAuditEvents).concat('matter.registered'));
+
 const expedienteAuditEvents: Readonly<Record<string, string>> = {
   closeExpediente: 'expediente.closed',
   reopenExpediente: 'expediente.reopened',
@@ -745,7 +747,7 @@ export async function findMatterActivityAuthorized(database: Database, input: { 
     if (visibility !== 'INSTITUTION' && visibility !== 'UNIT' || !canPerform(input.authorizationContext, 'records.read', unit ?? undefined)) throw new DomainInvariantError('NOT_AUTHORIZED', 'Actor cannot read matter activity');
     const states = await transaction.selectFrom('matter_state_events').selectAll().where('institution_id', '=', input.institutionId).where('matter_id', '=', input.matterId).execute();
     const audits = await transaction.selectFrom('audit_events').selectAll().where('institution_id', '=', input.institutionId).where('aggregate_type', '=', 'matter').where('aggregate_id', '=', input.matterId).execute();
-    return [...states.map((event) => ({ id: event.id, kind: 'state' as const, event_type: event.command, command: event.command, from_status: event.from_status, to_status: event.to_status, actor_user_id: event.actor_user_id, reason: event.reason, event_data: event.event_data, occurred_at: event.occurred_at })), ...audits.map((event) => ({ id: event.id, kind: 'audit' as const, event_type: event.event_type, from_status: null, to_status: null, actor_user_id: event.actor_user_id, reason: null, event_data: event.event_data, occurred_at: event.occurred_at }))].sort((left, right) => new Date(left.occurred_at).getTime() - new Date(right.occurred_at).getTime());
+    return [...states.map((event) => ({ id: event.id, kind: 'state' as const, event_type: event.command, command: event.command, from_status: event.from_status, to_status: event.to_status, actor_user_id: event.actor_user_id, reason: event.reason, event_data: event.event_data, occurred_at: event.occurred_at })), ...audits.filter((event) => !matterLifecycleAuditEvents.has(event.event_type)).map((event) => ({ id: event.id, kind: 'audit' as const, event_type: event.event_type, from_status: null, to_status: null, actor_user_id: event.actor_user_id, reason: null, event_data: event.event_data, occurred_at: event.occurred_at }))].sort((left, right) => new Date(left.occurred_at).getTime() - new Date(right.occurred_at).getTime());
   });
 }
 

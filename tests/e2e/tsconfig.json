@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@ici/config": ["packages/config/src/index.ts"],
+      "@ici/contracts": ["packages/contracts/src/index.ts"],
+      "@ici/database": ["packages/database/src/index.ts"],
+      "@ici/domain": ["packages/domain/src/index.ts"],
+      "@ici/integration-malware": ["packages/integrations/malware/src/index.ts"],
+      "@ici/integration-storage": ["packages/integrations/storage/src/index.ts"]
+    }
+  },
+  "include": ["server.ts"]
+}

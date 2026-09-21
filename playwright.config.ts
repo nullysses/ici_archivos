@@ -12,7 +12,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'pnpm build:packages && pnpm --filter @ici/api build && pnpm --filter @ici/api start',
+      command: 'pnpm build:packages && pnpm exec tsx tests/e2e/server.ts',
       port: 3000,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,

@@ -120,6 +120,21 @@ describe('matter HTTP API with real PostgreSQL persistence', () => {
     expect((await api().inject({ method: 'GET', url: `/matters/by-folio/${body.folio}`, headers: { authorization: 'Bearer test' } })).statusCode).toBe(200);
   });
 
+  it('shows lifecycle transitions once in the activity feed', async () => {
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'records.read']), unitCapabilities: new Map() } };
+    const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload: { ...payload, receivedAt: '2030-09-11T12:00:00.000Z' } });
+    const matterId = created.json<{ id: string }>().id;
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.assign', 'records.read']), unitCapabilities: new Map() } };
+    const assigned = await api().inject({ method: 'POST', url: `/matters/${matterId}/assign`, headers: { authorization: 'Bearer test' }, payload: { unitId: unitA, userId: userA } });
+    expect(assigned.statusCode).toBe(200);
+    const activity = await api().inject({ method: 'GET', url: `/matters/${matterId}/activity`, headers: { authorization: 'Bearer test' } });
+    expect(activity.statusCode).toBe(200);
+    const eventTypes = activity.json<{ items: Array<{ eventType: string }> }>().items.map((event) => event.eventType);
+    expect(eventTypes.filter((eventType) => eventType === 'registerMatter')).toHaveLength(1);
+    expect(eventTypes.filter((eventType) => eventType === 'assignMatter')).toHaveLength(1);
+    currentPrincipal = { ...currentPrincipal, authorization: { userId: userA, institutionId: institutionA, institutionCapabilities: new Set(['matter.register', 'records.read']), unitCapabilities: new Map() } };
+  });
+
   it('enforces scoped reads, tenant concealment, and stable validation errors', async () => {
     const created = await api().inject({ method: 'POST', url: '/matters', headers: { authorization: 'Bearer test' }, payload });
     const body = created.json<{ id: string }>();

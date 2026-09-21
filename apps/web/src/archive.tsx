@@ -26,7 +26,7 @@ export function ArchivePage(): ReactElement {
   const navigate = useNavigate();
   const [category, setCategory] = useState('READY');
   const [prepareId, setPrepareId] = useState<string | null>(null);
-  const queue = useQuery({ queryKey: ['archive', 'queue'], queryFn: fetchArchiveQueue, enabled: context.session !== null && context.session !== undefined && canInstitution(context.session, 'records.read'), refetchInterval: 15000 });
+  const queue = useQuery({ queryKey: ['archive', 'queue'], queryFn: fetchArchiveQueue, enabled: context.session !== null && context.session !== undefined && canInstitution(context.session, 'records.read'), refetchInterval: (query) => { const active = query.state.data?.transfers.some((item) => item.transferStatus === 'APPROVED' || item.transferStatus === 'SUBMITTED' || item.transferStatus === 'PRESERVING') ?? false; return active ? 15000 : false; } });
   const prepare = useMutation({ mutationFn: (expedienteId: string) => apiMutation<{ readonly id: string }>(`/expedientes/${expedienteId}/archive-transfers`, {}), onSuccess: (transfer) => { void queryClient.invalidateQueries({ queryKey: ['archive'] }); setPrepareId(null); void navigate(`/archive/transfers/${transfer.id}`); } });
   if (context.session === null || context.session === undefined || !canInstitution(context.session, 'records.read')) return <ForbiddenState />;
   if (queue.isPending) return <LoadingState label="Cargando bandeja archivística" />;

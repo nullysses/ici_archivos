@@ -1430,6 +1430,9 @@ function deriveArchiveTransferIntervention(input: {
   readonly job: { readonly status: IntegrationJobsTable['status']; readonly lastError: string | null } | null;
 }): ArchiveTransferInterventionReadModel | null {
   if (input.evidence?.lastRemoteStatus === 'USER_INPUT' || input.evidence?.lastIngestStatus === 'USER_INPUT') return { kind: 'USER_INPUT', message: 'Archivematica solicita una decisión humana antes de continuar.' };
+  const errorCode = input.job?.lastError?.split(':', 1)[0]?.trim();
+  if (errorCode === 'PRESERVATION_INTERVENTION_REQUIRED') return { kind: 'PRESERVATION_INTERVENTION', message: 'La preservación llegó al límite de evidencia automática y requiere verificación humana.' };
+  if (errorCode === 'ATOM_RECONCILIATION_REQUIRED' || errorCode === 'ARCHIVEMATICA_RECONCILIATION_REQUIRED' || errorCode === 'ARCHIVEMATICA_IDENTITY_CONFLICT') return { kind: 'RECONCILIATION', message: 'La operación remota no puede reintentarse de forma segura sin reconciliación.' };
   if (input.staging?.status === 'RECONCILIATION_REQUIRED' || input.evidence?.submissionStatus === 'RECONCILIATION_REQUIRED' || input.job?.lastError?.includes('RECONCILIATION') === true || input.job?.lastError?.includes('IDENTITY_CONFLICT') === true) return { kind: 'RECONCILIATION', message: 'La operación remota no puede reintentarse de forma segura sin reconciliación.' };
   if (input.job?.lastError?.includes('PRESERVATION_INTERVENTION_REQUIRED') === true || input.job?.lastError?.includes('not independently provable') === true) return { kind: 'PRESERVATION_INTERVENTION', message: 'La preservación llegó al límite de evidencia automática y requiere verificación humana.' };
   if (input.job?.status === 'FAILED') return { kind: 'FAILURE', message: input.job.lastError ?? 'La preservación falló y puede requerir reintento.' };

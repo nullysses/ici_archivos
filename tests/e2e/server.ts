@@ -8,8 +8,9 @@ import { createApp } from '../../apps/api/src/app.js';
 import { createMatterApplicationService } from '../../apps/api/src/matters.js';
 import { createExpedienteApplicationService } from '../../apps/api/src/expedientes.js';
 import { createArchiveTransferApplicationService } from '../../apps/api/src/transfers.js';
-import { beginArchiveTransferPreservationAtomically, claimArchiveTransferPreservationJobs, setExpedienteArchivalParentAtomically } from '../../packages/database/dist/index.js';
-import { runMalwareScanOnce } from '../../apps/worker/src/jobs.js';
+import { claimArchiveTransferPreservationJobs, setExpedienteArchivalParentAtomically } from '../../packages/database/dist/index.js';
+import { PreservationInterventionRequired } from '../../apps/worker/src/preservation.js';
+import { processClaimedArchiveTransferPreservationJob, runMalwareScanOnce } from '../../apps/worker/src/jobs.js';
 import { UnauthenticatedError, type AuthenticatedPrincipal } from '../../apps/api/src/auth.js';
 import type { DocumentStoragePort } from '../../packages/integrations/storage/dist/index.js';
 import type { MalwareScannerPort } from '../../packages/integrations/malware/dist/index.js';
@@ -136,9 +137,11 @@ async function main(): Promise<void> {
   await archiveTransferService.approve({ institutionId, transferId: interventionTransferId, actorUserId: userId, correlationId: 'e2e-intervention-transfer-approve', authorization: archiveAuthorization });
   const interventionClaim = (await claimArchiveTransferPreservationJobs(database, institutionId, 1)).find((job) => job.aggregate_id === interventionTransferId);
   if (interventionClaim?.claim_token === null || interventionClaim === undefined) throw new Error('Intervention fixture could not claim preservation intent');
-  await beginArchiveTransferPreservationAtomically(database, { institutionId, transferId: interventionTransferId, jobId: interventionClaim.id, claimToken: interventionClaim.claim_token, correlationId: 'e2e-intervention-begin' });
   await database.insertInto('archivematica_transfers').values({ institution_id: institutionId, archive_transfer_id: interventionTransferId, submission_status: 'SUBMITTED', archivematica_transfer_uuid: interventionRemoteTransferId, sip_uuid: interventionSipId, aip_uuid: interventionAipId, dip_uuid: interventionDipId, processing_configuration: 'e2e', transfer_source_location_uuid: transferSourceLocationId, transfer_source_relative_path: 'e2e/intervention', last_remote_status: 'COMPLETE', last_ingest_status: 'COMPLETE', last_checked_at: new Date() }).execute();
-  await database.updateTable('integration_jobs').set({ last_error: 'PRESERVATION_INTERVENTION_REQUIRED: AtoM Item correlation is not independently provable' }).where('institution_id', '=', institutionId).where('id', '=', interventionClaim.id).execute();
+  await processClaimedArchiveTransferPreservationJob({
+    database,
+    preservation: { execute: () => Promise.reject(new PreservationInterventionRequired('AtoM Item correlation is not independently provable')) },
+  }, interventionClaim);
   app = await createApp({
     authenticateAccessToken: (token) => token === 'e2e-token'
       ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization: archiveAuthorization })

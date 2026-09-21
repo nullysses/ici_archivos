@@ -121,8 +121,14 @@ export async function runMalwareScanOnce(dependencies: MalwareScanWorkerDependen
 }
 
 function preservationFailureReason(error: unknown): string {
+  const code = error !== null && typeof error === 'object' && 'code' in error && typeof (error as { readonly code?: unknown }).code === 'string'
+    ? (error as { readonly code: string }).code
+    : undefined;
   const message = error instanceof Error ? error.message : 'Preservation execution failed';
-  return message.slice(0, 4000);
+  const diagnostic = code === undefined || message.startsWith(`${code}:`)
+    ? message
+    : `${code}: ${message}`;
+  return diagnostic.slice(0, 4000);
 }
 
 function hasCompletePreservationEvidence(result: PreservationExecutionResult): boolean {

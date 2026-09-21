@@ -40,17 +40,52 @@ function RegisterMatterDialog({ open, onClose, onCreated }: { readonly open: boo
 }
 
 export function MatterDetailPage(): ReactElement {
-  const { matterId = '' } = useParams(); const context = useShellContext(); const queryClient = useQueryClient();
+  const { matterId = '' } = useParams();
+  const context = useShellContext();
+  const queryClient = useQueryClient();
   const matter = useQuery({ queryKey: ['matter', matterId], queryFn: () => fetchMatter(matterId), enabled: matterId !== '' });
   const notes = useQuery({ queryKey: ['matter', matterId, 'notes'], queryFn: () => fetchMatterNotes(matterId), enabled: matterId !== '' });
   const units = useQuery({ queryKey: ['lookups', 'units'], queryFn: fetchUnits, enabled: matterId !== '' });
   const mutation = useMutation({ mutationFn: ({ path, body }: { path: string; body: unknown }) => apiMutation<Matter>(path, body), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['matter', matterId] }); void queryClient.invalidateQueries({ queryKey: ['matters'] }); } });
-  if (matter.isPending) return <LoadingState />; if (matter.error instanceof Error && 'status' in matter.error && (matter.error as { status?: number }).status === 404) return <NotFoundState />; if (matter.error || matter.data === undefined) return <ErrorState message={matter.error?.message} />;
-  const item = matter.data; const unitAllowed = context.session !== null && context.session !== undefined && canInUnit(context.session, 'matter.start', item.assignmentUnitId ?? item.destinationUnitId ?? '');
+  const [confirmVoid, setConfirmVoid] = useState(false);
+  if (matter.isPending) return <LoadingState />;
+  if (matter.error instanceof Error && 'status' in matter.error && (matter.error as { status?: number }).status === 404) return <NotFoundState />;
+  if (matter.error || matter.data === undefined) return <ErrorState message={matter.error?.message} />;
+  const item = matter.data;
   const effectiveUnit = item.assignmentUnitId ?? item.destinationUnitId ?? '';
+  const unitAllowed = context.session !== null && context.session !== undefined && canInUnit(context.session, 'matter.start', effectiveUnit);
   const unitName = effectiveUnit === '' ? 'Sin unidad' : units.data?.items.find((unit) => unit.id === effectiveUnit)?.name ?? 'Unidad asignada';
   const assignmentEditable = item.status === 'RECEIVED' || item.status === 'ASSIGNED' || item.status === 'IN_PROGRESS';
-  return <Stack spacing={3}><Button component={Link} startIcon={<ArrowBack />} to="/matters">Volver a asuntos</Button><Stack alignItems={{ md: 'center', xs: 'flex-start' }} direction={{ md: 'row', xs: 'column' }} justifyContent="space-between" spacing={2}><Box><Folio value={item.folio} /><Typography component="h2" variant="h3">{item.subject}</Typography><Typography color="text.secondary">{item.sender}</Typography></Box><LifecycleBadge status={item.status} /></Stack><Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { md: '2fr 1fr', xs: '1fr' } }}><Stack spacing={2}><InfoPanel title="Resumen"><Typography>{item.description}</Typography><Typography color="text.secondary">{item.channel} · Prioridad: {item.priority}</Typography></InfoPanel><NotesPanel matterId={matterId} notes={notes.data?.items ?? []} /><InfoPanel title="Actividad"><AuditTimeline entries={(notes.data?.items ?? []).map((note) => ({ id: note.id, label: note.noteType === 'RESPONSE' ? 'Respuesta agregada' : 'Nota agregada', at: note.createdAt }))} /></InfoPanel></Stack><Stack spacing={2}><InfoPanel title="Asignación"><Typography>{unitName}</Typography><Typography color="text.secondary">{item.assignmentUserId ? 'Responsable asignado' : 'Sin responsable'}</Typography>{assignmentEditable ? <AssignmentPanel item={item} /> : <ImmutableIndicator label="La asignación ya no es editable en este estado" />}</InfoPanel><InfoPanel title="Expediente relacionado">{item.linkedExpedienteId ? <Button component={Link} to={`/expedientes/${item.linkedExpedienteId}`}>Abrir expediente</Button> : <LinkExpedientePanel matterId={matterId} />}</InfoPanel><Stack spacing={1}>{item.status === 'ASSIGNED' && unitAllowed ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/start`, body: {} })} startIcon={<PlayArrow />} variant="contained">Iniciar trabajo</Button> : null}{item.status === 'IN_PROGRESS' && canInUnit(context.session, 'matter.resolve', effectiveUnit) ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/resolve`, body: { resolutionMetadata: { resultado: 'Resuelto en la operación' } } })} variant="contained">Resolver asunto</Button> : null}{item.status === 'RESOLVED' && item.linkedExpedienteId && canInUnit(context.session, 'matter.close', effectiveUnit) ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/close`, body: { closureMetadata: { confirmado: true } } })} variant="contained">Cerrar asunto</Button> : null}{item.status === 'RESOLVED' && item.linkedExpedienteId === null ? <Alert severity="info">Cerrar asunto no está disponible: primero vincula un expediente.</Alert> : null}<MutationError error={mutation.error} /></Stack></Stack></Box></Stack>;
+  return <>
+    <Stack spacing={3}>
+      <Button component={Link} startIcon={<ArrowBack />} to="/matters">Volver a asuntos</Button>
+      <Stack alignItems={{ md: 'center', xs: 'flex-start' }} direction={{ md: 'row', xs: 'column' }} justifyContent="space-between" spacing={2}>
+        <Box><Folio value={item.folio} /><Typography component="h2" variant="h3">{item.subject}</Typography><Typography color="text.secondary">{item.sender}</Typography></Box>
+        <LifecycleBadge status={item.status} />
+      </Stack>
+      <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { md: '2fr 1fr', xs: '1fr' } }}>
+        <Stack spacing={2}>
+          <InfoPanel title="Resumen"><Typography>{item.description}</Typography><Typography color="text.secondary">{item.channel} · Prioridad: {item.priority}</Typography></InfoPanel>
+          <NotesPanel matterId={matterId} notes={notes.data?.items ?? []} />
+          <InfoPanel title="Actividad"><AuditTimeline entries={(notes.data?.items ?? []).map((note) => ({ id: note.id, label: note.noteType === 'RESPONSE' ? 'Respuesta agregada' : 'Nota agregada', at: note.createdAt }))} /></InfoPanel>
+        </Stack>
+        <Stack spacing={2}>
+          <InfoPanel title="Asignación"><Typography>{unitName}</Typography><Typography color="text.secondary">{item.assignmentUserId ? 'Responsable asignado' : 'Sin responsable'}</Typography>{assignmentEditable ? <AssignmentPanel item={item} /> : <ImmutableIndicator label="La asignación ya no es editable en este estado" />}</InfoPanel>
+          <InfoPanel title="Expediente relacionado">{item.linkedExpedienteId ? <Button component={Link} to={`/expedientes/${item.linkedExpedienteId}`}>Abrir expediente</Button> : <LinkExpedientePanel matterId={matterId} />}</InfoPanel>
+          <Stack spacing={1}>
+            {item.status === 'ASSIGNED' && unitAllowed ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/start`, body: {} })} startIcon={<PlayArrow />} variant="contained">Iniciar trabajo</Button> : null}
+            {item.status === 'IN_PROGRESS' && canInUnit(context.session, 'matter.resolve', effectiveUnit) ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/resolve`, body: { resolutionMetadata: { resultado: 'Resuelto en la operación' } } })} variant="contained">Resolver asunto</Button> : null}
+            {item.status === 'RESOLVED' && canInUnit(context.session, 'matter.reopen', effectiveUnit) ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/reopen`, body: { reason: 'Reapertura operativa' } })} variant="outlined">Reabrir asunto</Button> : null}
+            {item.status === 'RESOLVED' && item.linkedExpedienteId && canInUnit(context.session, 'matter.close', effectiveUnit) ? <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ path: `/matters/${item.id}/close`, body: { closureMetadata: { confirmado: true } } })} variant="contained">Cerrar asunto</Button> : null}
+            {(item.status === 'RECEIVED' || item.status === 'ASSIGNED') && canInUnit(context.session, 'matter.void', effectiveUnit) ? <Button color="error" disabled={mutation.isPending} onClick={() => setConfirmVoid(true)} variant="outlined">Anular asunto</Button> : null}
+            {item.status === 'RESOLVED' && item.linkedExpedienteId === null ? <Alert severity="info">Cerrar asunto no está disponible: primero vincula un expediente.</Alert> : null}
+            <MutationError error={mutation.error} />
+          </Stack>
+        </Stack>
+      </Box>
+    </Stack>
+    {confirmVoid ? <ConfirmAction consequence="El asunto se marcará como anulado y no podrá continuar por el flujo operativo." onCancel={() => setConfirmVoid(false)} onConfirm={() => { setConfirmVoid(false); mutation.mutate({ path: `/matters/${item.id}/void`, body: { reason: 'Anulación operativa' } }); }} open title="Anular asunto" /> : null}
+  </>;
 }
 
 function InfoPanel({ title, children }: { readonly title: string; readonly children: ReactElement | ReactElement[] }): ReactElement { return <Box sx={{ bgcolor: 'background.paper', border: 1, borderColor: 'divider', borderRadius: 2, p: 2.5 }}><Typography gutterBottom variant="h6">{title}</Typography>{children}</Box>; }

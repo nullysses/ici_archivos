@@ -9,8 +9,8 @@ test('administrador consulta institución y administra una unidad', async ({ pag
 
   await page.goto('/admin/units');
   await expect(page.getByRole('heading', { name: 'Unidades organizacionales' })).toBeVisible();
-  await page.getByLabel('Código').last().fill('E2E-ADMIN');
-  await page.getByLabel('Nombre').last().fill('Unidad administrativa E2E');
+  await page.getByLabel('Código').first().fill('E2E-ADMIN');
+  await page.getByLabel('Nombre').first().fill('Unidad administrativa E2E');
   await page.getByRole('button', { name: 'Crear unidad' }).click();
   await expect(page.getByText('Unidad administrativa E2E')).toBeVisible();
 

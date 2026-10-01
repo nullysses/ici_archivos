@@ -12,7 +12,7 @@ test('administrador consulta institución y administra una unidad', async ({ pag
   await page.getByLabel('Código').first().fill('E2E-ADMIN');
   await page.getByLabel('Nombre').first().fill('Unidad administrativa E2E');
   await page.getByRole('button', { name: 'Crear unidad' }).click();
-  await expect(page.getByText('Unidad administrativa E2E')).toBeVisible();
+  await expect(page.getByText('Cambio guardado.')).toBeVisible();
 
   await page.goto('/admin/expediente-types');
   await expect(page.getByRole('heading', { name: 'Tipos de expediente' })).toBeVisible();

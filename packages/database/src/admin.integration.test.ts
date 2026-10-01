@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { sql } from 'kysely';
 import { applyFoundationMigrations, createAdminAssignment, createAdminExpedienteType, createAdminUnit, createDatabase, findAdminUsers, publishAdminExpedienteDraft, revokeAdminAssignment, updateAdminExpedienteDraft, updateAdminUnit, type Database } from './index.js';
 import type { AuthorizationContext } from '@ici/domain';
 
@@ -23,6 +24,7 @@ describe('M15 administrative persistence', () => {
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17.6-alpine3.22').start();
     database = createDatabase(container.getConnectionUri());
+    await sql`CREATE ROLE ici_app NOLOGIN NOSUPERUSER NOBYPASSRLS`.execute(database);
     await applyFoundationMigrations(database);
     await database.insertInto('institutions').values([
       { id: institutionA, code: 'ADMIN-A', name: 'Admin A', status: 'ACTIVE' },

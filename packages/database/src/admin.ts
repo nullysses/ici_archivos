@@ -12,6 +12,14 @@ function requireCapability(input: { readonly institutionId: InstitutionId | stri
 
 function now(): Date { return new Date(); }
 
+/**
+ * Delegation policy for the frozen identity model: identity.manage is the
+ * institution-scoped administrative authority to delegate any role registered
+ * in the institution. It is intentionally not a role-name check, and every
+ * assignment remains tenant-scoped and auditable.
+ */
+export const ADMIN_DELEGATION_POLICY = 'IDENTITY_MANAGE_DELEGATES_REGISTERED_ROLES' as const;
+
 export interface AdminInstitutionRecord { readonly id: string; readonly code: string; readonly name: string; readonly status: 'ACTIVE' | 'SUSPENDED'; }
 export async function findAdminInstitution(database: Database, input: { readonly institutionId: string; readonly authorizationContext: AuthorizationContext }): Promise<AdminInstitutionRecord> {
   requireCapability({ ...input, capability: 'institution.configure' });
@@ -105,6 +113,8 @@ export async function findAdminRoles(database: Database, input: { readonly insti
 }
 
 export async function createAdminAssignment(database: Database, input: { readonly institutionId: string; readonly actorUserId: string; readonly userId: string; readonly roleId: string; readonly unitId?: string | null; readonly correlationId: string; readonly authorizationContext: AuthorizationContext }): Promise<void> {
+  // See ADMIN_DELEGATION_POLICY: identity.manage deliberately authorizes this
+  // full institution-scoped delegation operation, including self-assignment.
   requireCapability({ ...input, capability: 'identity.manage' });
   await withAuditedTenantTransaction(database, { institutionId: input.institutionId, actorUserId: input.actorUserId, eventType: 'identity.assignment.created', aggregateType: 'user', aggregateId: input.userId, correlationId: input.correlationId, eventData: { roleId: input.roleId, unitId: input.unitId ?? null } }, async (transaction) => {
     const user = await transaction.selectFrom('users').select('id').where('institution_id', '=', input.institutionId).where('id', '=', input.userId).executeTakeFirst();

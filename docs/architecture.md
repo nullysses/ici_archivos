@@ -83,3 +83,14 @@ generan `audit_events`. La autenticación continúa delegada a OIDC; ICI no
 administra contraseñas ni credenciales del proveedor de identidad. La
 clasificación se presenta como sólo lectura porque el dominio congelado no
 define una capability mutacional autorizada para modificarla.
+
+La política de delegación vigente es explícita: `identity.manage`, evaluada a
+nivel institucional, autoriza delegar cualquier rol registrado dentro de la
+misma institución, incluso al propio administrador. Cada asignación conserva
+su scope institucional o de unidad, queda auditada y puede revocarse sin
+eliminar el historial.
+
+El editor de tipos conserva el schema JSON completo al cambiar etiquetas de
+campos. Cuando encuentra construcciones fuera del subconjunto seguro de la
+interfaz, muestra el draft en sólo lectura en lugar de reconstruirlo o perder
+restricciones.

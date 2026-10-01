@@ -14,7 +14,7 @@ import type { AuthenticateRequest } from './auth-plugin.js';
 import { createAuthenticationGuard } from './auth-plugin.js';
 
 export class AdminHttpError extends Error {
-  public constructor(readonly statusCode: 400 | 403 | 404 | 409, readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'NOT_FOUND' | 'CONFLICT', message: string) { super(message); this.name = 'AdminHttpError'; }
+  public constructor(readonly statusCode: 400 | 403 | 404 | 409 | 500, readonly code: 'INVALID_REQUEST' | 'FORBIDDEN' | 'NOT_FOUND' | 'CONFLICT' | 'INTERNAL_ERROR', message: string) { super(message); this.name = 'AdminHttpError'; }
 }
 
 export interface AdminApplicationService {
@@ -68,7 +68,7 @@ function toType(row: AdminTypeRecord) { return { id: row.id, code: row.code, nam
 
 export function installAdminRoutes(app: FastifyInstance, service: AdminApplicationService, authenticate: AuthenticateRequest): void {
   const preHandler = guardFor(authenticate);
-  const errors = { 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema, 409: MatterErrorSchema } as const;
+  const errors = { 400: MatterErrorSchema, 401: MatterErrorSchema, 403: MatterErrorSchema, 404: MatterErrorSchema, 409: MatterErrorSchema, 500: MatterErrorSchema } as const;
   app.get('/admin/institution', { preHandler, schema: { response: { 200: AdminInstitutionResponseSchema, ...errors } } }, async (request) => toInstitution(await service.institution({ principal: request.principal })));
   app.patch<{ Body: AdminInstitutionUpdate }>('/admin/institution', { preHandler, schema: { body: AdminInstitutionUpdateSchema, response: { 200: AdminInstitutionResponseSchema, ...errors } } }, async (request) => toInstitution(await service.updateInstitution({ principal: request.principal, request: request.body })));
   app.get('/admin/units', { preHandler, schema: { response: { 200: AdminUnitsResponseSchema, ...errors } } }, async (request) => ({ items: (await service.units({ principal: request.principal })).map(toUnit) }));
@@ -91,6 +91,8 @@ export function mapAdminError(error: unknown): AdminHttpError {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED') return new AdminHttpError(403, 'FORBIDDEN', 'No tienes permisos para esta operación administrativa');
   if (code?.endsWith('_NOT_FOUND') || code === 'INSTITUTION_NOT_FOUND' || code === 'VERSION_NOT_FOUND' || code === 'ROLE_NOT_FOUND' || code === 'ASSIGNMENT_NOT_FOUND') return new AdminHttpError(404, 'NOT_FOUND', error instanceof Error ? error.message : 'Recurso administrativo no encontrado');
-  if (code === 'VERSION_IMMUTABLE' || code === 'UNIT_HIERARCHY_INVALID' || code === 'UNIT_PARENT_NOT_FOUND') return new AdminHttpError(409, 'CONFLICT', error instanceof Error ? error.message : 'La operación entra en conflicto con el estado actual');
-  return new AdminHttpError(400, 'INVALID_REQUEST', error instanceof Error ? error.message : 'La solicitud administrativa no es válida');
+  if (code === 'VERSION_IMMUTABLE' || code === 'VERSION_NOT_DRAFT' || code === 'UNIT_HIERARCHY_INVALID' || code === 'UNIT_PARENT_NOT_FOUND' || code === '23505' || code === '23503') return new AdminHttpError(409, 'CONFLICT', error instanceof Error ? error.message : 'La operación entra en conflicto con el estado actual');
+  const knownValidationCodes = new Set(['INVALID_INSTITUTION_NAME', 'INVALID_UNIT', 'INVALID_SCHEMA', 'USER_NOT_FOUND', 'UNIT_NOT_FOUND', 'INVALID_REQUEST']);
+  if (code !== undefined && knownValidationCodes.has(code)) return new AdminHttpError(400, 'INVALID_REQUEST', error instanceof Error ? error.message : 'La solicitud administrativa no es válida');
+  return new AdminHttpError(500, 'INTERNAL_ERROR', 'No fue posible completar la operación administrativa');
 }

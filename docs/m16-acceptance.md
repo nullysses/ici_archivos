@@ -12,7 +12,7 @@ aceptación contra proveedores externos. No se marca una integración real como
 | --- | --- | --- |
 | Aplicación, contratos y autorización | PASS | `pnpm test` y `pnpm typecheck` |
 | Persistencia PostgreSQL, RLS y auditoría | PASS | `pnpm test:integration` (12 archivos, 94 tests) |
-| Oficialía → Gestor | PASS | `tests/e2e/operational-flow.spec.ts` |
+| Oficialía → Gestor, continuidad y límites de autorización | PASS | `tests/e2e/operational-flow.spec.ts` usa identidades E2E separadas: Oficialía registra/asigna, Gestor inicia y completa el trabajo; la Oficialía sin `matter.start` recibe 403 |
 | Documentos, malware y versiones | PASS | `packages/database/src/document-intake.integration.test.ts`, `apps/worker/src/jobs.integration.test.ts`, flujo Playwright operativo |
 | Transferencia, manifest inmutable e intervención | PASS | `tests/e2e/archive-flow.spec.ts`, pruebas de transfer/worker |
 | Administración, scopes y publicación de tipos | PASS | `tests/e2e/admin-flow.spec.ts`, `packages/database/src/admin.integration.test.ts` |
@@ -32,10 +32,14 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-El escenario operativo comprueba persistencia tras recarga y que un expediente
-cerrado no permite cargar documentos ni crear nuevas versiones. El escenario
-Archivista conserva la frontera fail-closed: AIP + DIP no se presenta como
-`COMPLETED` cuando falta correlación verificable DIP → Item → File.
+El escenario operativo comprueba, con identidades y permisos diferenciados,
+el registro y traspaso de Oficialía al Gestor, una operación autorizada del
+Gestor y el rechazo de una transición sin la capacidad requerida. También
+comprueba persistencia tras recarga, el estado `CLEAN` mediante sondeo con
+tiempo máximo explícito y que un expediente cerrado no permite cargar
+documentos ni crear nuevas versiones. El escenario Archivista conserva la
+frontera fail-closed: AIP + DIP no se presenta como `COMPLETED` cuando falta
+correlación verificable DIP → Item → File.
 
 ## Nivel B — aceptación local integrada
 

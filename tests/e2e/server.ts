@@ -19,6 +19,8 @@ import type { MalwareScannerPort } from '../../packages/integrations/malware/dis
 const institutionId = '22000000-0000-4000-8000-000000000001';
 const userId = '22000000-0000-4000-8000-000000000002';
 const unitId = '22000000-0000-4000-8000-000000000003';
+const gestorUserId = '22000000-0000-4000-8000-000000000014';
+const gestorMembershipId = '22000000-0000-4000-8000-000000000015';
 const classificationId = '22000000-0000-4000-8000-000000000004';
 const roleId = '22000000-0000-4000-8000-000000000005';
 const membershipId = '22000000-0000-4000-8000-000000000006';
@@ -92,6 +94,20 @@ const authorization: AuthenticatedPrincipal['authorization'] = {
   unitCapabilities: new Map(),
 };
 
+const oficialiaAuthorization: AuthenticatedPrincipal['authorization'] = {
+  userId,
+  institutionId,
+  institutionCapabilities: new Set(['matter.register', 'matter.assign', 'records.read']),
+  unitCapabilities: new Map(),
+};
+
+const gestorAuthorization: AuthenticatedPrincipal['authorization'] = {
+  userId: gestorUserId,
+  institutionId,
+  institutionCapabilities: new Set(['records.read', 'expediente.create', 'expediente.edit_open', 'document.version_open', 'expediente.close']),
+  unitCapabilities: new Map([[unitId, new Set(['matter.start', 'matter.resolve', 'matter.close'])]]),
+};
+
 let database: Database | undefined;
 let container: Awaited<ReturnType<PostgreSqlContainer['start']>> | undefined;
 let app: Awaited<ReturnType<typeof createApp>> | undefined;
@@ -114,8 +130,10 @@ async function main(): Promise<void> {
   await database.insertInto('institutions').values({ id: institutionId, code: 'E2E', name: 'Institución E2E', status: 'ACTIVE' }).execute();
   await database.insertInto('organizational_units').values({ id: unitId, institution_id: institutionId, code: 'E2E-UNIT', name: 'Unidad E2E', status: 'ACTIVE' }).execute();
   await database.insertInto('users').values({ id: userId, institution_id: institutionId, display_name: 'Operador E2E', status: 'ACTIVE' }).execute();
+  await database.insertInto('users').values({ id: gestorUserId, institution_id: institutionId, display_name: 'Gestor E2E', status: 'ACTIVE' }).execute();
   await database.insertInto('roles').values({ id: roleId, code: 'E2E_OPERATOR', name: 'Operador E2E' }).execute();
   await database.insertInto('user_role_assignments').values({ id: membershipId, institution_id: institutionId, user_id: userId, role_id: roleId, unit_id: unitId, effective_from: new Date('2020-01-01T00:00:00.000Z') }).execute();
+  await database.insertInto('user_role_assignments').values({ id: gestorMembershipId, institution_id: institutionId, user_id: gestorUserId, role_id: roleId, unit_id: unitId, effective_from: new Date('2020-01-01T00:00:00.000Z') }).execute();
   await database.insertInto('access_classifications').values({ id: classificationId, institution_id: institutionId, legal_classification: 'PUBLIC', operational_visibility: 'INSTITUTION' }).execute();
   await database.insertInto('expediente_types').values({ id: typeId, institution_id: institutionId, code: 'E2E', name: 'Expediente E2E', status: 'ACTIVE' }).execute();
   await database.insertInto('expediente_type_versions').values({ id: typeVersionId, institution_id: institutionId, expediente_type_id: typeId, version_number: 1, status: 'PUBLISHED', schema_json: { type: 'object', properties: { title: { type: 'string', title: 'Título' } }, required: ['title'] }, archival_mapping_json: { levelOfDescription: 'File' }, created_at: new Date(), published_at: new Date() }).execute();
@@ -145,9 +163,12 @@ async function main(): Promise<void> {
     preservation: { execute: () => Promise.reject(new PreservationInterventionRequired('AtoM Item correlation is not independently provable')) },
   }, interventionClaim);
   app = await createApp({
-    authenticateAccessToken: (token) => token === 'e2e-token'
-      ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization: adminAuthorization })
-      : Promise.reject(new UnauthenticatedError()),
+    authenticateAccessToken: (token) => {
+      if (token === 'e2e-token') return Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-admin', authorization: adminAuthorization });
+      if (token === 'e2e-oficialia-token') return Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-oficialia', authorization: oficialiaAuthorization });
+      if (token === 'e2e-gestor-token') return Promise.resolve({ userId: gestorUserId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-gestor', authorization: gestorAuthorization });
+      return Promise.reject(new UnauthenticatedError());
+    },
     matterService: createMatterApplicationService(database),
     expedienteService: expedienteService,
     archiveTransferService,

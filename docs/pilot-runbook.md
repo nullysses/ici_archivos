@@ -19,15 +19,33 @@ aceptación en `infra/spikes/archival-integration/README.md`.
 ```bash
 pnpm install --frozen-lockfile
 pnpm infra:up
-curl -fsS http://127.0.0.1:3000/health
 docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.yml ps
-pnpm dev:api
-pnpm dev:web
 ```
 
 La migración corre antes del worker. El worker requiere Redis, MinIO, ClamAV y
 el rol PostgreSQL de aplicación; si una dependencia no está saludable no debe
-considerarse listo para pilotaje.
+considerarse listo para pilotaje. La API y la web son procesos persistentes:
+arráncalos en terminales independientes:
+
+```bash
+# Terminal 1
+pnpm dev:api
+
+# Terminal 2
+pnpm dev:web
+```
+
+También puede usarse el comando conjunto, que mantiene ambos procesos activos:
+
+```bash
+pnpm dev
+```
+
+Sólo después de que la API esté escuchando, comprueba su estado:
+
+```bash
+curl -fsS http://127.0.0.1:3000/health
+```
 
 ## Diagnóstico seguro
 
@@ -42,19 +60,44 @@ PostgreSQL está degradado; no es equivalente a una API inalcanzable.
 
 ## Backup y recuperación mínima
 
+Clientes necesarios: Docker Compose, `curl`, `mc` (MinIO Client) y los
+clientes PostgreSQL `pg_dump`/`pg_restore` si se ejecutan fuera del contenedor.
+Las credenciales deben cargarse desde un archivo local no versionado:
+
+```bash
+set -a; . infra/compose/.env; set +a
+```
+
 ICI-owned:
 
 ```bash
-pg_dump --format=custom --file=ici-archivos-$(date +%Y%m%d).dump "$DATABASE_URL"
+backup_stamp=$(date +%Y%m%d)
 mc alias set ici "$S3_ENDPOINT" "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY"
-mc mirror "$S3_QUARANTINE_BUCKET" ./backup/quarantine
-mc mirror "$S3_CLEAN_BUCKET" ./backup/clean
+mc mirror "ici/$S3_QUARANTINE_BUCKET" ./backup/quarantine
+mc mirror "ici/$S3_CLEAN_BUCKET" ./backup/clean
+
+# No usar ici_app para un respaldo integral. En Compose, POSTGRES_USER es la
+# identidad migradora con privilegios suficientes para pg_dump.
+docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.yml \
+  exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  --format=custom --file="/tmp/ici-archivos-$backup_stamp.dump"
+docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.yml \
+  cp "postgres:/tmp/ici-archivos-$backup_stamp.dump" \
+  "./ici-archivos-$backup_stamp.dump"
 ```
 
-Para una prueba desechable, restaure el dump en una base nueva, aplique las
-migraciones sólo si aún faltan y verifique que cada `storage_key` usado por los
-documentos sigue existiendo en el bucket correspondiente. Restaurar únicamente
-PostgreSQL no restaura los binarios.
+En un piloto institucional, sustituye `POSTGRES_USER` por una identidad de
+respaldo administrada por la plataforma con privilegios explícitos para leer
+todos los esquemas/tablas y secuencias necesarios para `pg_dump` (y sólo esos
+privilegios). La identidad `ici_app` es el rol de aplicación, está sujeta a RLS
+y no debe utilizarse para un respaldo integral.
+
+Para una restauración desechable se requieren `pg_restore` y una base nueva;
+aplica las migraciones sólo si aún faltan y verifica que cada `storage_key`
+usado por los documentos sigue existiendo en el bucket correspondiente. El
+procedimiento de recuperación completo queda para la siguiente fase de QA y
+permanece `NOT VERIFIED`; restaurar únicamente PostgreSQL no restaura los
+binarios.
 
 AtoM, Archivematica y Storage Service mantienen datos externos: sus backups,
 AIPs, DIPs y configuración no están incluidos en el backup de ICI. La

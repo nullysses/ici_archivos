@@ -67,3 +67,19 @@ authoritative activity. `USER_INPUT`, reconciliation, and the M11
 `PRESERVATION_INTERVENTION_REQUIRED` boundary remain explicit human-action
 states; the UI never marks a transfer complete from a DIP UUID alone and never
 offers blind resubmission.
+## Administración M15
+
+La aplicación mantiene la administración dentro de `/admin` y reutiliza las
+capabilities institucionales existentes. Las superficies implementadas son:
+
+- configuración institucional limitada a propiedades editables soportadas;
+- unidades organizacionales, con desactivación en lugar de borrado;
+- usuarios, roles/grants y membresías de unidad, con revocación histórica;
+- drafts y publicación de versiones de tipos de expediente;
+- consulta de la clasificación archivística.
+
+Todas las mutaciones administrativas pasan por servicios tenant-scoped y
+generan `audit_events`. La autenticación continúa delegada a OIDC; ICI no
+administra contraseñas ni credenciales del proveedor de identidad. La
+clasificación se presenta como sólo lectura porque el dominio congelado no
+define una capability mutacional autorizada para modificarla.

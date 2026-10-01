@@ -23,7 +23,7 @@ const administrationNavigation: readonly NavigationItem[] = [
   { label: 'Unidades', path: '/admin/units', icon: BusinessOutlinedIcon, capability: 'identity.manage' },
   { label: 'Usuarios y acceso', path: '/admin/access', icon: PeopleAltOutlinedIcon, capability: 'identity.manage' },
   { label: 'Tipos de expediente', path: '/admin/expediente-types', icon: Inventory2OutlinedIcon, capability: 'expediente_type.manage_draft' },
-  { label: 'Clasificación archivística', path: '/admin/classification', icon: FolderOutlinedIcon, capability: 'archive_transfer.prepare' },
+  { label: 'Clasificación archivística', path: '/admin/classification', icon: FolderOutlinedIcon, capability: 'records.read' },
   { label: 'Institución', path: '/admin/institution', icon: SettingsOutlinedIcon, capability: 'institution.configure' },
 ];
 

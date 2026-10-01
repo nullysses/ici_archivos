@@ -103,6 +103,14 @@ export interface ArchiveQueue { readonly readyForPreparation: readonly { readonl
 export interface TransferActivity { readonly id: string; readonly eventType: string; readonly occurredAt: string; readonly actorUserId: string | null; }
 export interface ArchiveTransferWorkspace { readonly transfer: { readonly id: string; readonly expedienteId: string; readonly status: string; readonly createdAt: string; readonly updatedAt: string; readonly manifest: TransferManifest }; readonly expediente: { readonly id: string; readonly folio: string; readonly status: string }; readonly archivalPath: readonly ArchivalPathNode[]; readonly atom: { readonly parent: { readonly id: string; readonly slug: string } | null; readonly file: { readonly id: string; readonly slug: string } | null }; readonly evidence: TransferEvidence | null; readonly staging: TransferStaging | null; readonly intervention: TransferIntervention | null; readonly job: { readonly status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'; readonly attemptCount: number; readonly lastError: string | null } | null; readonly activity: readonly TransferActivity[]; }
 export interface TransferManifest { readonly id: string; readonly transferId: string; readonly status: 'DRAFT' | 'APPROVED'; readonly canonicalJson: string; readonly sha256: string | null; readonly approvedBy: string | null; readonly approvedAt: string | null; readonly documents: readonly { readonly documentId: string; readonly versionId: string; readonly versionNumber: number; readonly filename: string; readonly sha256: string; readonly sizeBytes: string; readonly mimeType: string; readonly current: boolean }[]; }
+export interface AdminInstitution { readonly id: string; readonly code: string; readonly name: string; readonly status: string; }
+export interface AdminUnit { readonly id: string; readonly code: string; readonly name: string; readonly parentId: string | null; readonly status: 'ACTIVE' | 'INACTIVE'; }
+export interface AdminAssignment { readonly id: string; readonly roleId: string; readonly roleCode: string; readonly roleName: string; readonly unitId: string | null; readonly unitName: string | null; readonly capabilities: readonly string[]; readonly effectiveFrom: string; readonly effectiveUntil: string | null; }
+export interface AdminUser { readonly id: string; readonly displayName: string; readonly status: string; readonly assignments: readonly AdminAssignment[]; }
+export interface AdminRole { readonly id: string; readonly code: string; readonly name: string; }
+export interface AdminExpedienteTypeVersion { readonly id: string; readonly versionNumber: number; readonly status: 'DRAFT' | 'PUBLISHED' | 'RETIRED'; readonly schema: Record<string, unknown>; readonly archivalMapping: Record<string, unknown>; readonly createdAt: string; readonly publishedAt: string | null; }
+export interface AdminExpedienteType { readonly id: string; readonly code: string; readonly name: string; readonly status: string; readonly versions: readonly AdminExpedienteTypeVersion[]; }
+export interface AdminClassificationNode { readonly id: string; readonly parentId: string | null; readonly nodeType: string; readonly code: string; readonly name: string; readonly metadata: Record<string, unknown>; }
 
 export function fetchMatterInbox(): Promise<{ readonly items: readonly Matter[] }> { return apiRequest('/matters/inbox'); }
 export function fetchMatter(id: string): Promise<Matter> { return apiRequest(`/matters/${id}`); }
@@ -117,6 +125,12 @@ export function fetchUnitUsers(unitId: string): Promise<{ readonly items: readon
 export function fetchAccessClassifications(purpose: 'matter' | 'document' = 'matter'): Promise<{ readonly items: readonly AccessClassification[] }> { return apiRequest(`/lookups/access-classifications?purpose=${purpose}`); }
 export function fetchArchiveQueue(): Promise<ArchiveQueue> { return apiRequest('/archive/queue'); }
 export function fetchArchiveTransferWorkspace(id: string): Promise<ArchiveTransferWorkspace> { return apiRequest(`/archive-transfers/${id}/workspace`); }
+export function fetchAdminInstitution(): Promise<{ readonly institution: AdminInstitution }> { return apiRequest('/admin/institution'); }
+export function fetchAdminUnits(): Promise<{ readonly items: readonly AdminUnit[] }> { return apiRequest('/admin/units'); }
+export function fetchAdminUsers(): Promise<{ readonly items: readonly AdminUser[] }> { return apiRequest('/admin/access/users'); }
+export function fetchAdminRoles(): Promise<{ readonly items: readonly AdminRole[] }> { return apiRequest('/admin/access/roles'); }
+export function fetchAdminExpedienteTypes(): Promise<{ readonly items: readonly AdminExpedienteType[] }> { return apiRequest('/admin/expediente-types'); }
+export function fetchAdminClassification(): Promise<{ readonly items: readonly AdminClassificationNode[]; readonly readOnly: boolean; readonly reason: string }> { return apiRequest('/admin/classification'); }
 
 export async function apiMutation<T>(path: string, body: unknown, method = 'POST'): Promise<T> {
   return apiRequest<T>(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

@@ -237,6 +237,7 @@ export async function insertIntegrationJob(executor: DatabaseTransaction, input:
 export type { DatabaseSchema } from './schema.js';
 export type { JsonObject } from '@ici/domain';
 export * from './services.js';
+export * from './admin.js';
 export * from './repositories.js';
 export * from './permissions.js';
 export * from './json-schema-validator.js';

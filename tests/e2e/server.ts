@@ -8,6 +8,7 @@ import { createApp } from '../../apps/api/src/app.js';
 import { createMatterApplicationService } from '../../apps/api/src/matters.js';
 import { createExpedienteApplicationService } from '../../apps/api/src/expedientes.js';
 import { createArchiveTransferApplicationService } from '../../apps/api/src/transfers.js';
+import { createAdminApplicationService } from '../../apps/api/src/admin.js';
 import { claimArchiveTransferPreservationJobs, setExpedienteArchivalParentAtomically } from '../../packages/database/dist/index.js';
 import { PreservationInterventionRequired } from '../../apps/worker/src/preservation.js';
 import { processClaimedArchiveTransferPreservationJob, runMalwareScanOnce } from '../../apps/worker/src/jobs.js';
@@ -127,6 +128,7 @@ async function main(): Promise<void> {
   await expedienteService.create({ id: archiveExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-archive-create', request: { expedienteTypeVersionId: typeVersionId, metadata: { title: 'Transferencia archivística E2E' } } });
   const storage = new MemoryStorage();
   const archiveAuthorization = { ...authorization, institutionCapabilities: new Set([...authorization.institutionCapabilities, 'archive_transfer.prepare' as const, 'archive_transfer.approve' as const, 'archive_transfer.retry' as const, 'expediente.close' as const]) };
+  const adminAuthorization = { ...archiveAuthorization, institutionCapabilities: new Set([...archiveAuthorization.institutionCapabilities, 'identity.manage' as const, 'institution.configure' as const, 'expediente_type.manage_draft' as const, 'expediente_type.publish' as const]) };
   await setExpedienteArchivalParentAtomically(database, { institutionId, expedienteId: archiveExpedienteId, archivalParentNodeId: seriesId, actorUserId: userId, correlationId: 'e2e-archive-parent', authorizationContext: archiveAuthorization });
   await expedienteService.close({ id: archiveExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-archive-close', request: { closureMetadata: { reason: 'E2E archival preparation' } }, authorization: archiveAuthorization });
   await expedienteService.create({ id: interventionExpedienteId, institutionId, actorUserId: userId, correlationId: 'e2e-intervention-create', request: { expedienteTypeVersionId: typeVersionId, metadata: { title: 'Intervención archivística E2E' } } });
@@ -144,11 +146,12 @@ async function main(): Promise<void> {
   }, interventionClaim);
   app = await createApp({
     authenticateAccessToken: (token) => token === 'e2e-token'
-      ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization: archiveAuthorization })
+      ? Promise.resolve({ userId, institutionId, issuer: 'https://e2e.example.test', subject: 'e2e-user', authorization: adminAuthorization })
       : Promise.reject(new UnauthenticatedError()),
     matterService: createMatterApplicationService(database),
     expedienteService: expedienteService,
     archiveTransferService,
+    adminService: createAdminApplicationService(database),
     database,
     documentDependencies: { database, storage, maxBytes: 1024n * 1024n },
     checkDatabase: () => Promise.resolve(true),

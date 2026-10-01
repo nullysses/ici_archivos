@@ -9,8 +9,8 @@ description/access, and Archivematica digital preservation.
 
 ## Status
 
-**Milestone 11 — production preservation orchestration: implemented; external
-deployment verification remains operational work.**
+**Milestone 16 — end-to-end acceptance and pilot hardening: implemented;
+external vendor acceptance remains an explicit operational gate.**
 
 The implemented path covers matter registration, assignment and workflow;
 expediente creation, linkage and closure; expediente-owned and matter-owned
@@ -21,10 +21,10 @@ hierarchy synchronization are implemented with draft-only, tenant-scoped
 mappings. The production worker now composes the frozen AtoM and Archivematica
 adapters: it validates the approved manifest, builds a deterministic package
 from CLEAN document versions, stages it in the configured Archivematica Transfer
-Source, resumes durable transfer/ingest observations, verifies AIP storage, and
-requires an AtoM File with a linked digital object before returning preservation
-success. Archivematica `USER_INPUT`, ambiguous staging/submission, and unprovable
-DIP delivery remain explicit intervention/reconciliation outcomes; the worker
+Source, resumes durable transfer/ingest observations, and verifies the frozen
+evidence contract before returning preservation success. Archivematica
+`USER_INPUT`, ambiguous staging/submission, and unprovable DIP-to-AtoM Item
+correlation remain explicit intervention/reconciliation outcomes; the worker
 does not guess or retry those operations blindly. Configure
 `ARCHIVEMATICA_TRANSFER_SOURCE_ROOT` only when the worker and Transfer Source
 share a supported filesystem boundary. The local development stack includes PostgreSQL, MinIO
@@ -35,9 +35,12 @@ The audit findings tranche AH-1 through AH-6 is complete and frozen. The
 authoritative reconciliation is recorded in
 [`docs/audit/AH-6-final-audit.md`](docs/audit/AH-6-final-audit.md).
 
-Milestones 1–10 and audit findings AH-1 through AH-6 remain frozen. The next
-roadmap work is deployment/vendor acceptance and the separately scoped Milestone
-12 end-to-end acceptance automation.
+Milestones 1–15 and audit findings AH-1 through AH-6 remain frozen. M16 records
+the deterministic acceptance matrix and pilot procedures in
+[`docs/m16-acceptance.md`](docs/m16-acceptance.md) and
+[`docs/pilot-runbook.md`](docs/pilot-runbook.md). Live AtoM/Archivematica
+acceptance remains a separate, explicitly unverified gate unless the pinned
+vendor stack and credentials are available.
 
 ![ICI Archivos implementation status](status-milestone-9-current.png)
 

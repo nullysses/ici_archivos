@@ -49,12 +49,14 @@ package from an uncertain crash window; uncertain evidence requires
 reconciliation rather than overwrite or blind resubmission.
 
 The completion contract is evidence-based: the exact approved manifest bytes
-are present in the package and its AIP is verified through Storage Service; the
-AtoM documented read response must report the target File's digital object after
-Archivematica's native DIP upload. AtoM publication and direct DIP/SWORD calls
-remain outside ICI's boundary. Transfer and ingest `USER_INPUT`, incomplete
-SIP/AIP evidence, and unavailable public proof of DIP delivery are surfaced as
-intervention outcomes, not silently classified as successful preservation.
+are present in the package and its AIP is verified through Storage Service.
+Archivematica's native DIP upload is not treated as proof that the resulting
+Items are attached to the intended AtoM File because the pinned public APIs do
+not expose that correlation reliably. AtoM publication and direct DIP/SWORD
+calls remain outside ICI's boundary. Transfer and ingest `USER_INPUT`,
+incomplete SIP/AIP evidence, and unavailable public proof of DIP delivery are
+surfaced as intervention outcomes, not silently classified as successful
+preservation.
 
 ## Archivista work area
 

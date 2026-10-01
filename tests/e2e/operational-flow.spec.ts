@@ -52,6 +52,8 @@ test('completes the Oficialía to Gestor operational workflow', async ({ page })
   await page.getByLabel('Nota de cierre').fill('Cierre operativo E2E');
   await page.getByRole('button', { name: 'Cerrar asunto' }).click();
   await expect(page.getByText('Cerrado', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Cerrado', { exact: true })).toBeVisible();
 
   await page.goto('/expedientes');
   await page.getByRole('link', { name: expedienteFolio ?? /EXP-/ }).click();
@@ -59,4 +61,8 @@ test('completes the Oficialía to Gestor operational workflow', async ({ page })
   await page.getByRole('button', { name: 'Cerrar expediente' }).click();
   await page.getByRole('button', { name: 'Confirmar' }).click();
   await expect(page.getByText('Cerrado', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Cerrado', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Nueva versión' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cargar documento' })).toHaveCount(0);
 });

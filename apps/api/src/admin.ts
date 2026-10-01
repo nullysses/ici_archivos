@@ -91,7 +91,9 @@ export function mapAdminError(error: unknown): AdminHttpError {
   const code = error instanceof Error && 'code' in error ? String(error.code) : undefined;
   if (code === 'NOT_AUTHORIZED') return new AdminHttpError(403, 'FORBIDDEN', 'No tienes permisos para esta operación administrativa');
   if (code?.endsWith('_NOT_FOUND') || code === 'INSTITUTION_NOT_FOUND' || code === 'VERSION_NOT_FOUND' || code === 'ROLE_NOT_FOUND' || code === 'ASSIGNMENT_NOT_FOUND') return new AdminHttpError(404, 'NOT_FOUND', error instanceof Error ? error.message : 'Recurso administrativo no encontrado');
-  if (code === 'VERSION_IMMUTABLE' || code === 'VERSION_NOT_DRAFT' || code === 'UNIT_HIERARCHY_INVALID' || code === 'UNIT_PARENT_NOT_FOUND' || code === '23505' || code === '23503') return new AdminHttpError(409, 'CONFLICT', error instanceof Error ? error.message : 'La operación entra en conflicto con el estado actual');
+  if (code === 'VERSION_IMMUTABLE' || code === 'VERSION_NOT_DRAFT' || code === 'UNIT_HIERARCHY_INVALID' || code === 'UNIT_PARENT_NOT_FOUND') return new AdminHttpError(409, 'CONFLICT', error instanceof Error ? error.message : 'La operación entra en conflicto con el estado actual');
+  if (code === '23505') return new AdminHttpError(409, 'CONFLICT', 'El recurso administrativo ya existe o entra en conflicto con otro registro');
+  if (code === '23503') return new AdminHttpError(409, 'CONFLICT', 'La operación entra en conflicto con relaciones administrativas existentes');
   const knownValidationCodes = new Set(['INVALID_INSTITUTION_NAME', 'INVALID_UNIT', 'INVALID_SCHEMA', 'USER_NOT_FOUND', 'UNIT_NOT_FOUND', 'INVALID_REQUEST']);
   if (code !== undefined && knownValidationCodes.has(code)) return new AdminHttpError(400, 'INVALID_REQUEST', error instanceof Error ? error.message : 'La solicitud administrativa no es válida');
   return new AdminHttpError(500, 'INTERNAL_ERROR', 'No fue posible completar la operación administrativa');

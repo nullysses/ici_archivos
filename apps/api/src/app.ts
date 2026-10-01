@@ -31,7 +31,11 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof MatterHttpError || error instanceof DocumentHttpError || error instanceof ExpedienteHttpError || error instanceof TransferHttpError || error instanceof AdminHttpError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if ((error as { readonly code?: unknown }).code === 'FST_ERR_VALIDATION') return reply.code(400).send({ error: { code: 'INVALID_REQUEST', message: 'Request validation failed' } });
-    if (request.url.startsWith('/admin/')) { const mapped = mapAdminError(error); return reply.code(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message } }); }
+    if (request.url.startsWith('/admin/')) {
+      const mapped = mapAdminError(error);
+      if (mapped.code === 'INTERNAL_ERROR' || ((error as { readonly code?: unknown }).code === '23505') || ((error as { readonly code?: unknown }).code === '23503')) request.log.error(error, 'Administrative operation failed');
+      return reply.code(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message } });
+    }
     request.log.error(error);
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
   });

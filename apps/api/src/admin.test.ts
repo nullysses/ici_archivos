@@ -15,4 +15,18 @@ describe('administrative error boundary', () => {
     expect(result.code).toBe('INTERNAL_ERROR');
     expect(result.message).not.toContain('duplicate key');
   });
+
+  it('maps PostgreSQL unique violations to a safe conflict message', () => {
+    const result = mapAdminError(Object.assign(new Error('duplicate key value violates unique constraint users_secret_index'), { code: '23505' }));
+    expect(result.statusCode).toBe(409);
+    expect(result.code).toBe('CONFLICT');
+    expect(result.message).not.toContain('users_secret_index');
+  });
+
+  it('maps PostgreSQL foreign-key violations to a safe conflict message', () => {
+    const result = mapAdminError(Object.assign(new Error('insert or update violates foreign key constraint organizational_units_parent_id_fkey'), { code: '23503' }));
+    expect(result.statusCode).toBe(409);
+    expect(result.code).toBe('CONFLICT');
+    expect(result.message).not.toContain('organizational_units_parent_id_fkey');
+  });
 });
